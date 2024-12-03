@@ -197,12 +197,12 @@ int main() {
     // Write flow data to CSV
     
 
-    imshow("Optical Flow", img_color);
-   cv::waitKey(0);
+    // imshow("Optical Flow", img_color);
+    // cv::waitKey(0);
     // Save visualization
     cv::imwrite("optical_flow_visualization.png", img_color);
    
-    cv::waitKey(0);
+    // cv::waitKey(0);
    
     return 0;
 }
