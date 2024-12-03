@@ -1,0 +1,15 @@
+#!/bin/bash
+
+#SBATCH -J launcher           # Job name
+##SBATCH --exclusive
+#SBATCH -t 00:03:00           # Run time (hh:mm:ss) - 3 minutes
+#SBATCH -p mi2104x             # Desired partition, used to be devel
+
+g++ horn_schunk.cpp -o output \
+    -I/home1/bustudent08/local/include/opencv4 \
+    -L/home1/bustudent08/local/lib64 \
+    -lopencv_core -lopencv_highgui -lopencv_imgproc -lopencv_imgcodecs -lopencv_video \
+    -std=c++17 \
+    -Wl,-rpath=/home1/bustudent08/local/lib64
+
+srun ./output
