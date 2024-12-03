@@ -2,25 +2,48 @@
 import cv2
 import numpy as np
 from matplotlib import pyplot as plt
-from scipy.ndimage.filters import convolve as convolve2d
 import os
 from argparse import ArgumentParser
 from scipy.signal import convolve2d
-
+import math
+import csv
 """
 see readme for running instructions
 """
 
+def write_flow_to_csv(flow_x, flow_y, filename, Ix):
+    """
+    Writes optical flow data to a CSV file.
 
-def show_image(name, image):
-    if image is None:
-        return
+    Parameters:
+        flow_x (np.ndarray): Horizontal flow (u component).
+        flow_y (np.ndarray): Vertical flow (v component).
+        filename (str): The filename for the CSV file.
+    """
+    try:
+        with open(filename, mode='w', newline='') as csv_file:
+            csv_writer = csv.writer(csv_file)
 
-    cv2.imshow(name, image)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+            # Write header
+            csv_writer.writerow(["x", "y", "flow_x", "flow_y", "magnitude", "angle", "Ix"])
 
+            # Write flow data
+            for y in range(flow_x.shape[0]):
+                for x in range(flow_x.shape[1]):
+                    # Compute flow components
+                    fx = flow_x[y, x]
+                    fy = flow_y[y, x]
 
+                    # Compute magnitude and angle
+                    magnitude = math.sqrt(fx ** 2 + fy ** 2)
+                    angle = math.atan2(fy, fx) * 180.0 / math.pi
+                    ix = Ix[y,x]
+                    # Write to CSV
+                    csv_writer.writerow([x, y, fx, fy, magnitude, angle, ix])
+
+        print(f"Flow data written to {filename}")
+    except IOError as e:
+        print(f"Error writing to file {filename}: {e}")
 
 #compute magnitude in each 8 pixels. return magnitude average
 def get_magnitude(u, v):
@@ -64,7 +87,34 @@ def draw_quiver(u,v,beforeImg):
     plt.show()
 
 
+def draw_optical_flow(flow_u, flow_v, image, scale=3, step=16):
+    """
+    Draws optical flow vectors on the image.
 
+    Parameters:
+        flow_u (np.ndarray): Horizontal flow (u component).
+        flow_v (np.ndarray): Vertical flow (v component).
+        image (np.ndarray): The image to draw on (should be BGR or grayscale).
+        scale (int): Scale factor for the flow vectors.
+        step (int): Sampling step size for the flow vectors.
+    """
+    for y in range(0, image.shape[0], step):
+        for x in range(0, image.shape[1], step):
+            # Get flow components at this point
+            flow = (flow_u[y, x], flow_v[y, x])
+            print(f"Flow at ({x}, {y}): U = {flow[0]}, V = {flow[1]}")
+
+            # Define start and end points for the vector
+            start_point = (x, y)
+            end_point = (
+                int(x + flow[0] * scale),
+                int(y + flow[1] * scale)
+            )
+
+            # Draw the arrowed line on the image
+            cv2.arrowedLine(image, start_point, end_point, (255, 0, 0), 1, cv2.LINE_AA, tipLength=0.2)
+
+    return image
 
 
 
@@ -85,7 +135,6 @@ def HornSchunck(
     *,
     alpha: float = 0.001,
     Niter: int = 8,
-    verbose: bool = False
 ) -> tuple[np.ndarray, np.ndarray]:
     """
 
@@ -126,6 +175,7 @@ def HornSchunck(
         U = uAvg - fx * der
         V = vAvg - fy * der
 
+    write_flow_to_csv(U, V, "trueFlow.csv", fx)
     return U, V
 
 
@@ -152,8 +202,11 @@ if __name__ == '__main__':
     im2 = cv2.imread(args.img2, 0).astype(float)
 
     U, V = HornSchunck(im1, im2, alpha=1.0, Niter=100)
-    draw_quiver(U,V, im1)
-
-
-
+    #draw_quiver(U,V, im1)
+    img_color = cv2.imread(args.img1)
+    optical_flow = draw_optical_flow(U,V, img_color)
+    cv2.imshow("flow", optical_flow)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+    cv2.imwrite("trueOpticalFlow.png", optical_flow)
 
