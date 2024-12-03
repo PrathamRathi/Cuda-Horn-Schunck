@@ -2,9 +2,10 @@
 import cv2
 import numpy as np
 from matplotlib import pyplot as plt
-from scipy.ndimage.filters import convolve as filter2
+from scipy.ndimage.filters import convolve as convolve2d
 import os
 from argparse import ArgumentParser
+from scipy.signal import convolve2d
 
 """
 see readme for running instructions
@@ -48,83 +49,97 @@ def draw_quiver(u,v,beforeImg):
 
     magnitudeAvg = get_magnitude(u, v)
 
-    for i in range(0, u.shape[0], 8):
-        for j in range(0, u.shape[1],8):
+    for i in range(0, u.shape[0], 16):
+        for j in range(0, u.shape[1],16):
             dy = v[i,j] * scale
             dx = u[i,j] * scale
-            magnitude = (dx**2 + dy**2)**0.5
-            #draw only significant changes
-            if magnitude > magnitudeAvg:
-                ax.arrow(j,i, dx, dy, color = 'red')
+            # magnitude = (dx**2 + dy**2)**0.5
+            # #draw only significant changes
+            # if magnitude > magnitudeAvg:
+            #     ax.arrow(j,i, dx, dy, color = 'red')
+            ax.arrow(j,i, dx, dy, color = 'red')
 
     plt.draw()
+    plt.savefig("true_hs.png")
     plt.show()
 
 
 
-#compute derivatives of the image intensity values along the x, y, time
-def get_derivatives(img1, img2):
-    #derivative masks
-    x_kernel = np.array([[-1, 1], [-1, 1]]) * 0.25
-    y_kernel = np.array([[-1, -1], [1, 1]]) * 0.25
-    t_kernel = np.ones((2, 2)) * 0.25
-
-    fx = filter2(img1,x_kernel) + filter2(img2,x_kernel)
-    fy = filter2(img1, y_kernel) + filter2(img2, y_kernel)
-    ft = filter2(img1, -t_kernel) + filter2(img2, t_kernel)
-
-    return [fx,fy, ft]
 
 
 
-#input: images name, smoothing parameter, tolerance
-#output: images variations (flow vectors u, v)
-#calculates u,v vectors and draw quiver
-def computeHS(name1, name2, alpha, delta):
-    beforeImg = cv2.imread(name1, cv2.IMREAD_GRAYSCALE)
-    afterImg = cv2.imread(name2, cv2.IMREAD_GRAYSCALE)
+HSKERN = np.array(
+    [[1 / 12, 1 / 6, 1 / 12], [1 / 6, 0, 1 / 6], [1 / 12, 1 / 6, 1 / 12]], float
+)
 
-    if beforeImg is None:
-        raise NameError("Can't find image: \"" + name1 + '\"')
-    elif afterImg is None:
-        raise NameError("Can't find image: \"" + name2 + '\"')
+kernelX = np.array([[-1, 1], [-1, 1]]) * 0.25  # kernel for computing d/dx
 
-    beforeImg = cv2.imread(name1, cv2.IMREAD_GRAYSCALE)
-    afterImg = cv2.imread(name2, cv2.IMREAD_GRAYSCALE)
+kernelY = np.array([[-1, -1], [1, 1]]) * 0.25  # kernel for computing d/dy
 
-    #removing noise
-    beforeImg  = cv2.GaussianBlur(beforeImg, (5, 5), 0)
-    afterImg = cv2.GaussianBlur(afterImg, (5, 5), 0)
+kernelT = np.ones((2, 2)) * 0.25
 
-    # set up initial values
-    u = np.zeros((beforeImg.shape[0], beforeImg.shape[1]))
-    v = np.zeros((beforeImg.shape[0], beforeImg.shape[1]))
-    fx, fy, ft = get_derivatives(beforeImg, afterImg)
-    avg_kernel = np.array([[1 / 12, 1 / 6, 1 / 12],
-                            [1 / 6, 0, 1 / 6],
-                            [1 / 12, 1 / 6, 1 / 12]], float)
-    iter_counter = 0
-    while True:
-        iter_counter += 1
-        u_avg = filter2(u, avg_kernel)
-        v_avg = filter2(v, avg_kernel)
-        p = fx * u_avg + fy * v_avg + ft
-        d = 4 * alpha**2 + fx**2 + fy**2
-        prev = u
 
-        u = u_avg - fx * (p / d)
-        v = v_avg - fy * (p / d)
+def HornSchunck(
+    im1: np.ndarray,
+    im2: np.ndarray,
+    *,
+    alpha: float = 0.001,
+    Niter: int = 8,
+    verbose: bool = False
+) -> tuple[np.ndarray, np.ndarray]:
+    """
 
-        diff = np.linalg.norm(u - prev, 2)
-        #converges check (at most 300 iterations)
-        if  diff < delta or iter_counter > 300:
-            # print("iteration number: ", iter_counter)
-            break
+    Parameters
+    ----------
 
-    draw_quiver(u, v, beforeImg)
+    im1: numpy.ndarray
+        image at t=0
+    im2: numpy.ndarray
+        image at t=1
+    alpha: float
+        regularization constant
+    Niter: int
+        number of iteration
+    """
+    im1 = im1.astype(np.float32)
+    im2 = im2.astype(np.float32)
 
-    return [u, v]
+    # set up initial velocities
+    uInitial = np.zeros([im1.shape[0], im1.shape[1]], dtype=np.float32)
+    vInitial = np.zeros([im1.shape[0], im1.shape[1]], dtype=np.float32)
 
+    # Set initial value for the flow vectors
+    U = uInitial
+    V = vInitial
+
+    # Estimate derivatives
+    [fx, fy, ft] = computeDerivatives(im1, im2)
+
+    # Iteration to reduce error
+    for _ in range(Niter):
+        # %% Compute local averages of the flow vectors
+        uAvg = convolve2d(U, HSKERN, "same")
+        vAvg = convolve2d(V, HSKERN, "same")
+        # %% common part of update step
+        der = (fx * uAvg + fy * vAvg + ft) / (alpha ** 2 + fx ** 2 + fy ** 2)
+        # %% iterative step
+        U = uAvg - fx * der
+        V = vAvg - fy * der
+
+    return U, V
+
+
+def computeDerivatives(
+    im1: np.ndarray, im2: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+
+    fx = convolve2d(im1, kernelX, "same") + convolve2d(im2, kernelX, "same")
+    fy = convolve2d(im1, kernelY, "same") + convolve2d(im2, kernelY, "same")
+
+    # ft = im2 - im1
+    ft = convolve2d(im1, kernelT, "same") + convolve2d(im2, -kernelT, "same")
+
+    return fx, fy, ft
 
 
 if __name__ == '__main__':
@@ -133,8 +148,11 @@ if __name__ == '__main__':
     parser.add_argument('img2', type = str, help='Second image name (include format)')
     args = parser.parse_args()
 
-    u,v = computeHS(args.img1, args.img2, alpha = 15, delta = 10**-1)
+    im1 = cv2.imread(args.img1, 0).astype(float)
+    im2 = cv2.imread(args.img2, 0).astype(float)
 
+    U, V = HornSchunck(im1, im2, alpha=1.0, Niter=100)
+    draw_quiver(U,V, im1)
 
 
 
