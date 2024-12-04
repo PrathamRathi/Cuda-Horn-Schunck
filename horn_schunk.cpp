@@ -73,29 +73,39 @@ void computeDerivatives(const Mat& im1, const Mat& im2, Mat& ix, Mat& iy, Mat& i
 }
 
 // Compute average flow from neighboring pixels using direct indexing
-void computeNeighborAverage(const cv::Mat& u, const cv::Mat& v,
-                             cv::Mat& uAvg, cv::Mat& vAvg) {
-    uAvg = cv::Mat::zeros(u.size(), CV_64F);
-    vAvg = cv::Mat::zeros(v.size(), CV_64F);
+// void computeNeighborAverage(const cv::Mat& u, const cv::Mat& v,
+//                              cv::Mat& uAvg, cv::Mat& vAvg) {
+//     uAvg = cv::Mat::zeros(u.size(), CV_64F);
+//     vAvg = cv::Mat::zeros(v.size(), CV_64F);
 
-    for (int y = 1; y < u.rows - 1; ++y) {
-        for (int x = 1; x < u.cols - 1; ++x) {
-            // Directly compute average from 8 neighboring pixels
-            uAvg.at<double>(y, x) = (
-                u.at<double>(y-1, x-1)/12 + u.at<double>(y-1, x)/6 + u.at<double>(y-1, x+1)/12 +
-                u.at<double>(y, x-1)/6 + u.at<double>(y, x+1)/6 +
-                u.at<double>(y+1, x-1)/12 + u.at<double>(y+1, x)/6 + u.at<double>(y+1, x+1)/12
-            );
+//     for (int y = 1; y < u.rows - 1; ++y) {
+//         for (int x = 1; x < u.cols - 1; ++x) {
+//             // Directly compute average from 8 neighboring pixels
+//             uAvg.at<double>(y, x) = (
+//                 u.at<double>(y-1, x-1)/12 + u.at<double>(y-1, x)/6 + u.at<double>(y-1, x+1)/12 +
+//                 u.at<double>(y, x-1)/6 + u.at<double>(y, x+1)/6 +
+//                 u.at<double>(y+1, x-1)/12 + u.at<double>(y+1, x)/6 + u.at<double>(y+1, x+1)/12
+//             );
 
-            vAvg.at<double>(y, x) = (
-                v.at<double>(y-1, x-1)/12 + v.at<double>(y-1, x)/6 + v.at<double>(y-1, x+1)/12 +
-                v.at<double>(y, x-1)/6 + v.at<double>(y, x+1)/6 +
-                v.at<double>(y+1, x-1)/12 + v.at<double>(y+1, x)/6 + v.at<double>(y+1, x+1)/12
-            );
-        }
-    }
+//             vAvg.at<double>(y, x) = (
+//                 v.at<double>(y-1, x-1)/12 + v.at<double>(y-1, x)/6 + v.at<double>(y-1, x+1)/12 +
+//                 v.at<double>(y, x-1)/6 + v.at<double>(y, x+1)/6 +
+//                 v.at<double>(y+1, x-1)/12 + v.at<double>(y+1, x)/6 + v.at<double>(y+1, x+1)/12
+//             );
+//         }
+//     }
+// }
+void computeNeighborAverage(const Mat& u, const Mat& v, Mat& uAvg, Mat& vAvg) {
+    // Define the kernel for the weighted average
+    Mat kernel = (Mat_<double>(3, 3) << 
+        1.0 / 12, 1.0 / 6, 1.0 / 12,
+        1.0 / 6,  0.0,      1.0 / 6,
+        1.0 / 12, 1.0 / 6, 1.0 / 12);
+
+    // Apply convolution using filter2D
+    filter2D(u, uAvg, -1, kernel, Point(-1, -1), 0, BORDER_CONSTANT);
+    filter2D(v, vAvg, -1, kernel, Point(-1, -1), 0, BORDER_CONSTANT);
 }
-
 // Compute optical flow using Horn-Schunck method
 void computeOpticalFlow(const cv::Mat& frame1, const cv::Mat& frame2,
                          cv::Mat& flowX, cv::Mat& flowY,
@@ -143,21 +153,65 @@ void computeOpticalFlow(const cv::Mat& frame1, const cv::Mat& frame2,
 void drawOpticalFlow(const Mat& flowU, const Mat& flowV, Mat& image, int scale = 3, int step = 16) {
     for (int y = 0; y < image.rows; y += step) {
         for (int x = 0; x < image.cols; x += step) {
-            cout << flowU.at<double>(y, x) << " " << flowV.at<double>(y, x) << endl;
             Point2f flow(flowU.at<double>(y, x), flowV.at<double>(y, x));
+            
+            // Calculate magnitude and angle of flow
+            float magnitude = sqrt(flow.x * flow.x + flow.y * flow.y);
+            float angle = atan2(flow.y, flow.x) * 180 / CV_PI;
+            
+            // Choose color based on angle
+            Scalar color;
+            if (angle < -60) {
+                color = Scalar(255, 182, 193);  // Light pink
+            } else if (angle < 60) {
+                color = Scalar(173, 216, 230);  // Light blue
+            } else {
+                color = Scalar(144, 238, 144);  // Light green
+            }
+            
             Point start(x, y);
             Point end(cvRound(x + flow.x * scale), cvRound(y + flow.y * scale));
-            arrowedLine(image, start, end, Scalar(0, 255, 0), 1, LINE_AA, 0, 0.2);
+            arrowedLine(image, start, end, color, 1, LINE_AA, 0, 0.2);
         }
     }
+}
+
+// Add this new visualization function
+void visualizeFlowHSV(const Mat& flowU, const Mat& flowV, Mat& output) {
+    Mat magnitude, angle;
+    Mat hsv(flowU.size(), CV_8UC3);
+
+    // Calculate magnitude and angle
+    cartToPolar(flowU, flowV, magnitude, angle, true);
+
+    // Normalize magnitude to the range [0, 255]
+    normalize(magnitude, magnitude, 0, 255, NORM_MINMAX);
+
+    // Create separate channels
+    vector<Mat> channels(3);
+
+    // H = angle (hue represents direction)
+    angle.convertTo(channels[0], CV_8U, 180.0 / CV_PI / 2.0);  // Scale to [0, 180] for OpenCV
+
+    // S = 255 (full saturation)
+    channels[1] = Mat::ones(flowU.size(), CV_8U) * 255;
+
+    // V = normalized magnitude
+    magnitude.convertTo(channels[2], CV_8U);
+
+    // Merge channels
+    merge(channels, hsv);
+
+    // Convert HSV to BGR
+    cvtColor(hsv, output, COLOR_HSV2BGR);
 }
 
 // Main function demonstrating usage
 int main() {
     std::cout << "Running Horn-Schunck optical flow..." << std::endl;
    
-    std::string filename1 = "images/frame1.png";
-    std::string filename2 = "images/frame2.png";
+    std::string filename1 = "images/car1.jpg";
+    std::string filename2 = "images/car2.jpg";
 
     // std::string filename1 = "images/car1.jpg";
     // std::string filename2 = "images/car2.jpg";
@@ -176,7 +230,7 @@ int main() {
    
     // Compute optical flow
     cv::Mat flowX, flowY;
-    computeOpticalFlow(frame1, frame2, flowX, flowY, 1, 100);
+    computeOpticalFlow(frame1, frame2, flowX, flowY, 0.5, 200);
 
      // Visualize optical flow
     Mat img_color;
@@ -194,5 +248,10 @@ int main() {
    
     // cv::waitKey(0);
    
+    // Add these lines after computing optical flow
+    Mat flow_vis;
+    visualizeFlowHSV(flowX, flowY, flow_vis);
+    imwrite("outputs/optical_flow_hsv_car.png", flow_vis);
+    
     return 0;
 }
