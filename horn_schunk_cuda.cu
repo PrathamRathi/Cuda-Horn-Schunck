@@ -103,7 +103,6 @@ void computeDerivatives(const Mat& im1, const Mat& im2, Mat& ix, Mat& iy, Mat& i
 //                              cv::Mat& uAvg, cv::Mat& vAvg) {
 //     uAvg = cv::Mat::zeros(u.size(), CV_64F);
 //     vAvg = cv::Mat::zeros(v.size(), CV_64F);
-
 //     for (int y = 1; y < u.rows - 1; ++y) {
 //         for (int x = 1; x < u.cols - 1; ++x) {
 //             // Directly compute average from 8 neighboring pixels
@@ -121,6 +120,7 @@ void computeDerivatives(const Mat& im1, const Mat& im2, Mat& ix, Mat& iy, Mat& i
 //         }
 //     }
 // }
+
 void computeNeighborAverage(const Mat& u, const Mat& v, Mat& uAvg, Mat& vAvg) {
     // Define the kernel for the weighted average
     Mat kernel = (Mat_<double>(3, 3) << 
