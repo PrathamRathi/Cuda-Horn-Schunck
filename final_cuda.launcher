@@ -13,4 +13,14 @@ hipcc -x hip -O2 horn_schunk_cuda.cu -DUSE_HIP -o output_cuda.exe \
     -std=c++17 \
     -Wl,-rpath=/home1/bustudent13/local/lib64
 
-srun ./output_cuda.exe
+srun ./output_cuda.exe images/car1.jpg images/car2.jpg car
+
+
+# images/frame1.png
+# images/frame2.png
+
+# images/car1.jpg
+# images/car2.jpg
+
+# images/eval-data/Basketball/frame10.png
+# images/eval-data/Basketball/frame11.png

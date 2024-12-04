@@ -236,14 +236,12 @@ __global__ void horn_schunk(double* __restrict__ u, double* __restrict__ v,
 }
 
 // Main function demonstrating usage
-int main() {
+int main(int argc, char* argv[]) {
     cout << "Running Horn-Schunck optical flow..." << endl;
-   
-    // string filename1 = "images/frame1.png";
-    // string filename2 = "images/frame2.png";
 
-    string filename1 = "images/car1.jpg";
-    string filename2 = "images/car2.jpg";
+    string filename1 = argv[1];
+    string filename2 = argv[2];
+    string outputname = argv[3];
 
     // Load two consecutive frames
     Mat frame1 = imread(filename1, 0);
@@ -335,7 +333,7 @@ int main() {
     visualizeFlowHSV(flowX, flowY, flow_vis);
 
     cout << "Writing optical flow images." << endl;
-    imwrite("outputs/CUDA_optical_flow.png", img_color);
-    imwrite("outputs/CUDA_optical_flow_hsv.png", flow_vis);
+    imwrite("outputs/CUDA_optical_flow_" + outputname + ".png", img_color);
+    imwrite("outputs/CUDA_optical_flow_hsv_" + outputname + ".png", flow_vis);
     return 0;
 }
