@@ -47,6 +47,36 @@ void drawOpticalFlow(const Mat& flowX, const Mat& flowY, Mat& image, int scale =
     }
 }
 
+// Add this new visualization function
+void visualizeFlowHSV(const Mat& flowU, const Mat& flowV, Mat& output) {
+    Mat magnitude, angle;
+    Mat hsv(flowU.size(), CV_8UC3);
+
+    // Calculate magnitude and angle
+    cartToPolar(flowU, flowV, magnitude, angle, true);
+
+    // Normalize magnitude to the range [0, 255]
+    normalize(magnitude, magnitude, 0, 255, NORM_MINMAX);
+
+    // Create separate channels
+    vector<Mat> channels(3);
+
+    // H = angle (hue represents direction)
+    angle.convertTo(channels[0], CV_8U, 180.0 / CV_PI / 2.0);  // Scale to [0, 180] for OpenCV
+
+    // S = 255 (full saturation)
+    channels[1] = Mat::ones(flowU.size(), CV_8U) * 255;
+
+    // V = normalized magnitude
+    magnitude.convertTo(channels[2], CV_8U);
+
+    // Merge channels
+    merge(channels, hsv);
+
+    // Convert HSV to BGR
+    cvtColor(hsv, output, COLOR_HSV2BGR);
+}
+
 template <typename T>
 vector<T> matToVector(const Mat& mat) {
     if (mat.empty()) {
@@ -266,11 +296,14 @@ int main() {
     Mat img_color, flowX, flowY;
     cvtColor(frame1, img_color, COLOR_GRAY2BGR);
     flowX = vectorToMat<double>(uHost, ny, nx, CV_64F);
-    flowY = vectorToMat<double>(vHost, ny, nx, CV_64F);
+    flowY = vectorToMat<double>(vHost, ny, nx, CV_64F); 
     drawOpticalFlow(flowX, flowY, img_color);
 
-    cout << "Writing optical flow image." << endl;
+    Mat flow_vis;
+    visualizeFlowHSV(flowX, flowY, flow_vis);
+
+    cout << "Writing optical flow images." << endl;
     imwrite("outputs/CUDA_optical_flow.png", img_color);
-   
+    imwrite("outputs/CUDA_optical_flow_hsv.png", flow_vis);
     return 0;
 }
