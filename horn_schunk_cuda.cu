@@ -34,43 +34,31 @@
 using namespace cv;
 using namespace std;
 
-// Write flow to a CSV file
-void writeFlowToCSV(const cv::Mat& flowX, const cv::Mat& flowY, const std::string& filename, const cv::Mat& Ix) {
-    std::ofstream csvFile(filename);
-   
-    if (!csvFile.is_open()) {
-        std::cerr << "Error opening file: " << filename << std::endl;
-        return;
+
+template <typename T>
+vector<T> matToVector(const Mat& mat) {
+    if (mat.empty()) {
+        throw runtime_error("Input matrix is empty.");
     }
 
-    // Write header
-    csvFile << "x,y,flow_x,flow_y,magnitude,angle, ix\n";
-
-    for (int y = 0; y < flowX.rows; ++y) {
-        for (int x = 0; x < flowX.cols; ++x) {
-            // Compute flow components
-            double fx = flowX.at<double>(y, x);
-            double fy = flowY.at<double>(y, x);
-           
-            // Compute magnitude and angle
-            double magnitude = std::sqrt(fx * fx + fy * fy);
-            double angle = std::atan2(fy, fx) * 180.0 / CV_PI;
-            double ix = Ix.at<double>(y, x);
-            // Write to CSV
-            csvFile << x << ","
-                    << y << ","
-                    << fx << ","
-                    << fy << ","
-                    << magnitude << ","
-                    << angle << ","
-                    << ix << "\n";
-        }
+    vector<T> vec(mat.rows * mat.cols * mat.channels());
+    for (int y = 0; y < mat.rows; ++y) {
+        const T* rowPtr = mat.ptr<T>(y);
+        copy(rowPtr, rowPtr + mat.cols, vec.begin() + y * mat.cols);
     }
-
-    csvFile.close();
-    std::cout << "Flow data written to " << filename << std::endl;
+    return vec;
 }
 
+// Function to convert a std::vector back to cv::Mat
+template <typename T>
+Mat vectorToMat(const vector<T>& vec, int rows, int cols, int type) {
+    Mat mat(rows, cols, type);
+    for (int y = 0; y < rows; ++y) {
+        T* rowPtr = mat.ptr<T>(y);
+        copy(vec.begin() + y * cols, vec.begin() + (y + 1) * cols, rowPtr);
+    }
+    return mat;
+}
 
 void computeDerivatives(const Mat& im1, const Mat& im2, Mat& ix, Mat& iy, Mat& it) {
     // Define kernels for calculating derivatives
@@ -98,89 +86,83 @@ void computeDerivatives(const Mat& im1, const Mat& im2, Mat& ix, Mat& iy, Mat& i
     it = ft1 + ft2;
 }
 
-// Compute average flow from neighboring pixels using direct indexing
-// void computeNeighborAverage(const cv::Mat& u, const cv::Mat& v,
-//                              cv::Mat& uAvg, cv::Mat& vAvg) {
-//     uAvg = cv::Mat::zeros(u.size(), CV_64F);
-//     vAvg = cv::Mat::zeros(v.size(), CV_64F);
-//     for (int y = 1; y < u.rows - 1; ++y) {
-//         for (int x = 1; x < u.cols - 1; ++x) {
-//             // Directly compute average from 8 neighboring pixels
-//             uAvg.at<double>(y, x) = (
-//                 u.at<double>(y-1, x-1)/12 + u.at<double>(y-1, x)/6 + u.at<double>(y-1, x+1)/12 +
-//                 u.at<double>(y, x-1)/6 + u.at<double>(y, x+1)/6 +
-//                 u.at<double>(y+1, x-1)/12 + u.at<double>(y+1, x)/6 + u.at<double>(y+1, x+1)/12
-//             );
+// Compute average flow using vector operations
+void computeNeighborAverage(const vector<double>& u, const vector<double>& v,
+                                  vector<double>& uAvg, vector<double>& vAvg,
+                                  int rows, int cols) {
+    uAvg.assign(u.size(), 0.0);
+    vAvg.assign(v.size(), 0.0);
 
-//             vAvg.at<double>(y, x) = (
-//                 v.at<double>(y-1, x-1)/12 + v.at<double>(y-1, x)/6 + v.at<double>(y-1, x+1)/12 +
-//                 v.at<double>(y, x-1)/6 + v.at<double>(y, x+1)/6 +
-//                 v.at<double>(y+1, x-1)/12 + v.at<double>(y+1, x)/6 + v.at<double>(y+1, x+1)/12
-//             );
-//         }
-//     }
-// }
+    for (int y = 1; y < rows - 1; ++y) {
+        for (int x = 1; x < cols - 1; ++x) {
+            int idx = y * cols + x;
+            uAvg[idx] = (
+                u[idx - cols - 1] / 12 + u[idx - cols] / 6 + u[idx - cols + 1] / 12 +
+                u[idx - 1] / 6 + u[idx + 1] / 6 +
+                u[idx + cols - 1] / 12 + u[idx + cols] / 6 + u[idx + cols + 1] / 12
+            );
 
-void computeNeighborAverage(const Mat& u, const Mat& v, Mat& uAvg, Mat& vAvg) {
-    // Define the kernel for the weighted average
-    Mat kernel = (Mat_<double>(3, 3) << 
-        1.0 / 12, 1.0 / 6, 1.0 / 12,
-        1.0 / 6,  0.0,      1.0 / 6,
-        1.0 / 12, 1.0 / 6, 1.0 / 12);
-
-    // Apply convolution using filter2D
-    filter2D(u, uAvg, -1, kernel, Point(-1, -1), 0, BORDER_CONSTANT);
-    filter2D(v, vAvg, -1, kernel, Point(-1, -1), 0, BORDER_CONSTANT);
+            vAvg[idx] = (
+                v[idx - cols - 1] / 12 + v[idx - cols] / 6 + v[idx - cols + 1] / 12 +
+                v[idx - 1] / 6 + v[idx + 1] / 6 +
+                v[idx + cols - 1] / 12 + v[idx + cols] / 6 + v[idx + cols + 1] / 12
+            );
+        }
+    }
 }
+
 // Compute optical flow using Horn-Schunck method
-void computeOpticalFlow(const cv::Mat& frame1, const cv::Mat& frame2,
-                         cv::Mat& flowX, cv::Mat& flowY,
-                         double alpha = 0.01, int iterations = 20) {
+void computeOpticalFlow(const Mat& frame1, const Mat& frame2, Mat& flowX, Mat& flowY,
+                        double alpha = 0.01, int iterations = 20) {
     // Compute image derivatives
-    cv::Mat Ix, Iy, It;
-    computeDerivatives(frame1, frame2, Ix, Iy, It);
+    Mat IxMat, IyMat, ItMat;
+    computeDerivatives(frame1, frame2, IxMat, IyMat, ItMat);
 
-    // Initialize flow fields
-    flowX = cv::Mat::zeros(frame1.size(), CV_64F);
-    flowY = cv::Mat::zeros(frame1.size(), CV_64F);
+    // Convert derivatives to vectors
+    vector<double> Ix = matToVector<double>(IxMat);
+    vector<double> Iy = matToVector<double>(IyMat);
+    vector<double> It = matToVector<double>(ItMat);
 
-    // Temporary matrices for averaging
-    cv::Mat uAvg, vAvg;
+    int rows = frame1.rows;
+    int cols = frame1.cols;
+
+    // Initialize flow fields as vectors
+    vector<double> u(rows * cols, 0.0);
+    vector<double> v(rows * cols, 0.0);
+    vector<double> uAvg(rows * cols, 0.0);
+    vector<double> vAvg(rows * cols, 0.0);
 
     // Iterative optimization
     for (int iter = 0; iter < iterations; ++iter) {
-        // Compute average flow from neighboring pixels
-        computeNeighborAverage(flowX, flowY, uAvg, vAvg);
-        cout << "iter " << iter << endl;
+        // Compute average flow using vector operations
+        computeNeighborAverage(u, v, uAvg, vAvg, rows, cols);
+
         // Update flow for each pixel
-        for (int y = 0; y < frame1.rows; ++y) {
-            for (int x = 0; x < frame1.cols; ++x) {
-                double ix = Ix.at<double>(y, x);
-                double iy = Iy.at<double>(y, x);
-                double it = It.at<double>(y, x);
+        for (int y = 0; y < rows; ++y) {
+            for (int x = 0; x < cols; ++x) {
+                int idx = y * cols + x;
+                double ix = Ix[idx];
+                double iy = Iy[idx];
+                double it = It[idx];
 
-                // Add small epsilon to prevent division by zero
                 double denom = alpha * alpha + ix * ix + iy * iy;
-
-                double uAvgVal = uAvg.at<double>(y,x);
-                double vAvgVal = vAvg.at<double>(y,x);
-                double p = (ix * uAvgVal + iy * vAvgVal + it);
-                double u = uAvgVal - ix * (p/denom);
-                double v = vAvgVal - iy * (p/denom);
-                flowX.at<double>(y,x) = u;
-                flowY.at<double>(y,x) = v;
+                double p = (ix * uAvg[idx] + iy * vAvg[idx] + it);
+                u[idx] = uAvg[idx] - ix * (p / denom);
+                v[idx] = vAvg[idx] - iy * (p / denom);
             }
         }
     }
-    writeFlowToCSV(flowX, flowY, "outputs/optical_flow.csv", Ix); //
+
+    // Convert flow vectors back to matrices
+    flowX = vectorToMat<double>(u, rows, cols, CV_64F);
+    flowY = vectorToMat<double>(v, rows, cols, CV_64F);
 }
 
 // Visualize optical flow
-void drawOpticalFlow(const Mat& flowU, const Mat& flowV, Mat& image, int scale = 3, int step = 16) {
+void drawOpticalFlow(const Mat& flowX, const Mat& flowY, Mat& image, int scale = 3, int step = 16) {
     for (int y = 0; y < image.rows; y += step) {
         for (int x = 0; x < image.cols; x += step) {
-            cout << flowU.at<double>(y, x) << " " << flowV.at<double>(y, x) << endl;
-            Point2f flow(flowU.at<double>(y, x), flowV.at<double>(y, x));
+            Point2f flow(flowX.at<double>(y, x), flowY.at<double>(y, x));
             Point start(x, y);
             Point end(cvRound(x + flow.x * scale), cvRound(y + flow.y * scale));
             arrowedLine(image, start, end, Scalar(0, 255, 0), 1, LINE_AA, 0, 0.2);
@@ -190,28 +172,28 @@ void drawOpticalFlow(const Mat& flowU, const Mat& flowV, Mat& image, int scale =
 
 // Main function demonstrating usage
 int main() {
-    std::cout << "Running Horn-Schunck optical flow..." << std::endl;
+    cout << "Running Horn-Schunck optical flow..." << endl;
    
-    std::string filename1 = "images/frame1.png";
-    std::string filename2 = "images/frame2.png";
+    // string filename1 = "images/frame1.png";
+    // string filename2 = "images/frame2.png";
 
-    // std::string filename1 = "images/car1.jpg";
-    // std::string filename2 = "images/car2.jpg";
+    string filename1 = "images/car1.jpg";
+    string filename2 = "images/car2.jpg";
 
     // Load two consecutive frames
-    cv::Mat frame1 = cv::imread(filename1, 0);
-    cv::Mat frame2 = cv::imread(filename2, 0);
+    Mat frame1 = imread(filename1, 0);
+    Mat frame2 = imread(filename2, 0);
    
     if (frame1.empty() || frame2.empty()) {
-        std::cerr << "Error loading images!" << std::endl;
-        std::cerr << "Make sure car1.jpg and car2.jpg exist in: " << std::filesystem::current_path() << std::endl;
+        cerr << "Error loading images!" << endl;
+        cerr << "Make sure " << filename1 << " and " << filename2 << " exist in: " << filesystem::current_path() << endl;
         return -1;
     }
    
-    std::cout << "Loaded images - Frame1: " << frame1.size() << " Frame2: " << frame2.size() << std::endl;
+    cout << "Loaded images - Frame1: " << frame1.size() << " Frame2: " << frame2.size() << endl;
    
     // Compute optical flow
-    cv::Mat flowX, flowY;
+    Mat flowX, flowY;
     computeOpticalFlow(frame1, frame2, flowX, flowY, 1, 100);
 
      // Visualize optical flow
@@ -220,15 +202,8 @@ int main() {
     
     drawOpticalFlow(flowX, flowY, img_color);
     
-    // Write flow data to CSV
-    
-
-    // imshow("Optical Flow", img_color);
-    // cv::waitKey(0);
-    // Save visualization
-    cv::imwrite("outputs/optical_flow_visualization.png", img_color);
+    imwrite("outputs/optical_flow_visualization.png", img_color);
    
-    // cv::waitKey(0);
    
     return 0;
 }
