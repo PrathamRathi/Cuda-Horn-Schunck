@@ -2,4 +2,4 @@
 *.csv
 *.out
 *.exe
-# *.launcher
+*.launcher

@@ -73,39 +73,29 @@ void computeDerivatives(const Mat& im1, const Mat& im2, Mat& ix, Mat& iy, Mat& i
 }
 
 // Compute average flow from neighboring pixels using direct indexing
-// void computeNeighborAverage(const cv::Mat& u, const cv::Mat& v,
-//                              cv::Mat& uAvg, cv::Mat& vAvg) {
-//     uAvg = cv::Mat::zeros(u.size(), CV_64F);
-//     vAvg = cv::Mat::zeros(v.size(), CV_64F);
+void computeNeighborAverage(const cv::Mat& u, const cv::Mat& v,
+                             cv::Mat& uAvg, cv::Mat& vAvg) {
+    uAvg = cv::Mat::zeros(u.size(), CV_64F);
+    vAvg = cv::Mat::zeros(v.size(), CV_64F);
 
-//     for (int y = 1; y < u.rows - 1; ++y) {
-//         for (int x = 1; x < u.cols - 1; ++x) {
-//             // Directly compute average from 8 neighboring pixels
-//             uAvg.at<double>(y, x) = (
-//                 u.at<double>(y-1, x-1)/12 + u.at<double>(y-1, x)/6 + u.at<double>(y-1, x+1)/12 +
-//                 u.at<double>(y, x-1)/6 + u.at<double>(y, x+1)/6 +
-//                 u.at<double>(y+1, x-1)/12 + u.at<double>(y+1, x)/6 + u.at<double>(y+1, x+1)/12
-//             );
+    for (int y = 1; y < u.rows - 1; ++y) {
+        for (int x = 1; x < u.cols - 1; ++x) {
+            // Directly compute average from 8 neighboring pixels
+            uAvg.at<double>(y, x) = (
+                u.at<double>(y-1, x-1)/12 + u.at<double>(y-1, x)/6 + u.at<double>(y-1, x+1)/12 +
+                u.at<double>(y, x-1)/6 + u.at<double>(y, x+1)/6 +
+                u.at<double>(y+1, x-1)/12 + u.at<double>(y+1, x)/6 + u.at<double>(y+1, x+1)/12
+            );
 
-//             vAvg.at<double>(y, x) = (
-//                 v.at<double>(y-1, x-1)/12 + v.at<double>(y-1, x)/6 + v.at<double>(y-1, x+1)/12 +
-//                 v.at<double>(y, x-1)/6 + v.at<double>(y, x+1)/6 +
-//                 v.at<double>(y+1, x-1)/12 + v.at<double>(y+1, x)/6 + v.at<double>(y+1, x+1)/12
-//             );
-//         }
-//     }
-// }
-void computeNeighborAverage(const Mat& u, const Mat& v, Mat& uAvg, Mat& vAvg) {
-    // Define the kernel for the weighted average
-    Mat kernel = (Mat_<double>(3, 3) << 
-        1.0 / 12, 1.0 / 6, 1.0 / 12,
-        1.0 / 6,  0.0,      1.0 / 6,
-        1.0 / 12, 1.0 / 6, 1.0 / 12);
-
-    // Apply convolution using filter2D
-    filter2D(u, uAvg, -1, kernel, Point(-1, -1), 0, BORDER_CONSTANT);
-    filter2D(v, vAvg, -1, kernel, Point(-1, -1), 0, BORDER_CONSTANT);
+            vAvg.at<double>(y, x) = (
+                v.at<double>(y-1, x-1)/12 + v.at<double>(y-1, x)/6 + v.at<double>(y-1, x+1)/12 +
+                v.at<double>(y, x-1)/6 + v.at<double>(y, x+1)/6 +
+                v.at<double>(y+1, x-1)/12 + v.at<double>(y+1, x)/6 + v.at<double>(y+1, x+1)/12
+            );
+        }
+    }
 }
+
 // Compute optical flow using Horn-Schunck method
 void computeOpticalFlow(const cv::Mat& frame1, const cv::Mat& frame2,
                          cv::Mat& flowX, cv::Mat& flowY,
