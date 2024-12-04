@@ -146,7 +146,7 @@ void computeOpticalFlow(const cv::Mat& frame1, const cv::Mat& frame2,
             }
         }
     }
-    writeFlowToCSV(flowX, flowY, "optical_flow.csv", Ix); //
+    writeFlowToCSV(flowX, flowY, "outputs/optical_flow.csv", Ix); //
 }
 
 // Visualize optical flow
@@ -166,11 +166,11 @@ void drawOpticalFlow(const Mat& flowU, const Mat& flowV, Mat& image, int scale =
 int main() {
     std::cout << "Running Horn-Schunck optical flow..." << std::endl;
    
-    std::string filename1 = "frame1.png";
-    std::string filename2 = "frame2.png";
+    std::string filename1 = "images/frame1.png";
+    std::string filename2 = "images/frame2.png";
 
-    // std::string filename1 = "car1.jpg";
-    // std::string filename2 = "car2.jpg";
+    // std::string filename1 = "images/car1.jpg";
+    // std::string filename2 = "images/car2.jpg";
 
     // Load two consecutive frames
     cv::Mat frame1 = cv::imread(filename1, 0);
@@ -200,7 +200,7 @@ int main() {
     // imshow("Optical Flow", img_color);
     // cv::waitKey(0);
     // Save visualization
-    cv::imwrite("optical_flow_visualization.png", img_color);
+    cv::imwrite("outputs/optical_flow_visualization.png", img_color);
    
     // cv::waitKey(0);
    
