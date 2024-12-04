@@ -107,8 +107,8 @@ __global__ void compute_neighbor_average(double* __restrict__ u, double* __restr
     const int local_y = threadIdx.y + 1;
     const int global_idx = global_y * nx + global_x;  
     
-    __shared__ double shared_u[BLOCK_DIM_Y + 2][BLOCK_DIM_X + 2];
-    __shared__ double shared_v[BLOCK_DIM_Y + 2][BLOCK_DIM_X + 2];
+    // __shared__ double shared_u[BLOCK_DIM_Y + 2][BLOCK_DIM_X + 2];
+    // __shared__ double shared_v[BLOCK_DIM_Y + 2][BLOCK_DIM_X + 2];
 
     // // Initialize shared memory to 0
     // shared_u[local_x][local_y] = 0.0; 
