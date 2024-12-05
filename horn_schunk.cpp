@@ -171,7 +171,7 @@ void drawOpticalFlow(const Mat& flowU, const Mat& flowV, Mat& image, int scale =
             
             Point start(x, y);
             Point end(cvRound(x + flow.x * scale), cvRound(y + flow.y * scale));
-            arrowedLine(image, start, end, color, 1, LINE_AA, 0, 0.2);
+            arrowedLine(image, start, end, Scalar(0, 255, 0), 1, LINE_AA, 0, 0.2);
         }
     }
 }
@@ -179,30 +179,32 @@ void drawOpticalFlow(const Mat& flowU, const Mat& flowV, Mat& image, int scale =
 // Add this new visualization function
 void visualizeFlowHSV(const Mat& flowU, const Mat& flowV, Mat& output) {
     Mat magnitude, angle;
-    Mat hsv(flowU.size(), CV_8UC3);
+    Mat flow[3];
+    Mat hsv;
 
     // Calculate magnitude and angle
     cartToPolar(flowU, flowV, magnitude, angle, true);
 
-    // Normalize magnitude to the range [0, 255]
-    normalize(magnitude, magnitude, 0, 255, NORM_MINMAX);
-
-    // Create separate channels
-    vector<Mat> channels(3);
-
-    // H = angle (hue represents direction)
-    angle.convertTo(channels[0], CV_8U, 180.0 / CV_PI / 2.0);  // Scale to [0, 180] for OpenCV
-
+    // Create HSV image
+    hsv.create(flowU.size(), CV_8UC3);
+    
+    // Normalize magnitude to 0-255
+    Mat normalizedMag;
+    normalize(magnitude, normalizedMag, 0, 255, NORM_MINMAX);
+    
+    // Fill HSV channels
+    // H = angle/2 (divided by 2 to fit 0-180 range)
+    angle.convertTo(flow[0], CV_8U, 0.5);
     // S = 255 (full saturation)
-    channels[1] = Mat::ones(flowU.size(), CV_8U) * 255;
-
+    Mat saturation(flowU.size(), CV_8U, Scalar(255));
     // V = normalized magnitude
-    magnitude.convertTo(channels[2], CV_8U);
+    normalizedMag.convertTo(flow[2], CV_8U);
 
-    // Merge channels
-    merge(channels, hsv);
+    flow[1] = saturation;
 
-    // Convert HSV to BGR
+    merge(flow, 3, hsv);
+
+    // Convert HSV to BGR for display
     cvtColor(hsv, output, COLOR_HSV2BGR);
 }
 
@@ -252,6 +254,12 @@ int main() {
     Mat flow_vis;
     visualizeFlowHSV(flowX, flowY, flow_vis);
     imwrite("outputs/optical_flow_hsv_car.png", flow_vis);
+    
+   
+    // Add these lines after computing optical flow
+    Mat flow_vis;
+    visualizeFlowHSV(flowX, flowY, flow_vis);
+    imwrite("outputs/optical_flow_hsv.png", flow_vis);
     
     return 0;
 }

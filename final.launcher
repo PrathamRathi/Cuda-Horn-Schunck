@@ -5,11 +5,20 @@
 #SBATCH -t 00:03:00           # Run time (hh:mm:ss) - 3 minutes
 #SBATCH -p mi2104x             # Desired partition, used to be devel
 
-g++ horn_schunk.cpp -o output.exe \
-    -I/home1/bustudent13/local/include/opencv4 \
-    -L/home1/bustudent13/local/lib64 \
+hipcc -x hip -O2 horn_schunk_cuda.cu -DUSE_HIP -o output_cuda.exe \
+    -I/home1/bustudent08/local/include/opencv4 \
+    -L/home1/bustudent08/local/lib64 \
     -lopencv_core -lopencv_highgui -lopencv_imgproc -lopencv_imgcodecs -lopencv_video \
     -std=c++17 \
-    -Wl,-rpath=/home1/bustudent13/local/lib64
+    -Wl,-rpath=/home1/bustudent08/local/lib64
 
-srun ./output.exe
+srun ./output_cuda.exe images/car1.jpg images/car2.jpg car
+
+# images/frame1.png
+# images/frame2.png
+
+# images/car1.jpg
+# images/car2.jpg
+
+# images/eval-data/Basketball/frame10.png
+# images/eval-data/Basketball/frame11.png
