@@ -131,84 +131,107 @@ void computeDerivatives(const Mat& im1, const Mat& im2, Mat& ix, Mat& iy, Mat& i
 __global__ void compute_neighbor_average(double* __restrict__ u, double* __restrict__ v, 
                             double* __restrict__ uAvg, double* __restrict__ vAvg,
                                const int nx, const int ny) {     
-    __shared__ double shared_u[18][18];
-    __shared__ double shared_v[18][18];
+    // Define halo width
+    constexpr int HALO = 1;
 
-   // Thread indices
-    const int global_x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int global_y = blockIdx.y * blockDim.y + threadIdx.y;
-
-    // Local thread indices
-    const int local_x = threadIdx.x;
-    const int local_y = threadIdx.y;
-    
     // Shared memory dimensions including halos
-    const int shared_idx = local_y + 1;  // +1 to avoid the halo index at 0
-    const int shared_jdx = local_x + 1;  // +1 to avoid the halo index at 0
-
-    // Global index for linear arrays
-    const int global_idx = global_y * nx + global_x;
-
-    // Load main region into shared memory (including boundary elements)
-    if (global_x < nx && global_y < ny) {
-        shared_u[shared_jdx][shared_idx] = u[global_idx];
-        shared_v[shared_jdx][shared_idx] = v[global_idx];
-    } else {
-        shared_u[shared_jdx][shared_idx] = 0.0;
-        shared_v[shared_jdx][shared_idx] = 0.0;
+    __shared__ double s_u[18][18];
+    __shared__ double s_v[18][18];
+    
+    // Global indices
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    // Local indices within the shared memory block
+    int tx = threadIdx.x + HALO;
+    int ty = threadIdx.y + HALO;
+    
+    // Global linear index
+    int global_idx = y * nx + x;
+    
+    // Load center data
+    if (x < nx && y < ny) {
+        s_u[ty][tx] = u[global_idx];
+        s_v[ty][tx] = v[global_idx];
     }
-
-    // Load halos for neighboring elements from global memory
-    if (local_x == 0 && global_x > 0) {
-        shared_u[shared_jdx - 1][shared_idx] = u[global_idx - 1];
-        shared_v[shared_jdx - 1][shared_idx] = v[global_idx - 1];
+    
+    // Load halo data
+    // Top halo
+    if (threadIdx.y == 0 && y > 0) {
+        s_u[ty-HALO][tx] = u[global_idx - nx];
+        s_v[ty-HALO][tx] = v[global_idx - nx];
     }
-    if (local_x == blockDim.x - 1 && global_x < nx - 1) {
-        shared_u[shared_jdx + 1][shared_idx] = u[global_idx + 1];
-        shared_v[shared_jdx + 1][shared_idx] = v[global_idx + 1];
+    
+    // Bottom halo
+    if (threadIdx.y == blockDim.y - 1 && y < ny - 1) {
+        s_u[ty+HALO][tx] = u[global_idx + nx];
+        s_v[ty+HALO][tx] = v[global_idx + nx];
     }
-    if (local_y == 0 && global_y > 0) {
-        shared_u[shared_jdx][shared_idx - 1] = u[global_idx - nx];
-        shared_v[shared_jdx][shared_idx - 1] = v[global_idx - nx];
+    
+    // Left halo
+    if (threadIdx.x == 0 && x > 0) {
+        s_u[ty][tx-HALO] = u[global_idx - 1];
+        s_v[ty][tx-HALO] = v[global_idx - 1];
     }
-    if (local_y == blockDim.y - 1 && global_y < ny - 1) {
-        shared_u[shared_jdx][shared_idx + 1] = u[global_idx + nx];
-        shared_v[shared_jdx][shared_idx + 1] = v[global_idx + nx];
+    
+    // Right halo
+    if (threadIdx.x == blockDim.x - 1 && x < nx - 1) {
+        s_u[ty][tx+HALO] = u[global_idx + 1];
+        s_v[ty][tx+HALO] = v[global_idx + 1];
     }
-
-    // Corners (Halo corners)
-    if (local_x == 0 && local_y == 0 && global_x > 0 && global_y > 0) {
-        shared_u[shared_jdx - 1][shared_idx - 1] = u[global_idx - nx - 1];
-        shared_v[shared_jdx - 1][shared_idx - 1] = v[global_idx - nx - 1];
+    
+    // Corner halos
+    // Top-left
+    if (threadIdx.x == 0 && threadIdx.y == 0 && x > 0 && y > 0) {
+        s_u[ty-HALO][tx-HALO] = u[global_idx - nx - 1];
+        s_v[ty-HALO][tx-HALO] = v[global_idx - nx - 1];
     }
-    if (local_x == blockDim.x - 1 && local_y == 0 && global_x < nx - 1 && global_y > 0) {
-        shared_u[shared_jdx + 1][shared_idx - 1] = u[global_idx - nx + 1];
-        shared_v[shared_jdx + 1][shared_idx - 1] = v[global_idx - nx + 1];
+    
+    // Top-right
+    if (threadIdx.x == blockDim.x - 1 && threadIdx.y == 0 && x < nx - 1 && y > 0) {
+        s_u[ty-HALO][tx+HALO] = u[global_idx - nx + 1];
+        s_v[ty-HALO][tx+HALO] = v[global_idx - nx + 1];
     }
-    if (local_x == 0 && local_y == blockDim.y - 1 && global_x > 0 && global_y < ny - 1) {
-        shared_u[shared_jdx - 1][shared_idx + 1] = u[global_idx + nx - 1];
-        shared_v[shared_jdx - 1][shared_idx + 1] = v[global_idx + nx - 1];
+    
+    // Bottom-left
+    if (threadIdx.x == 0 && threadIdx.y == blockDim.y - 1 && x > 0 && y < ny - 1) {
+        s_u[ty+HALO][tx-HALO] = u[global_idx + nx - 1];
+        s_v[ty+HALO][tx-HALO] = v[global_idx + nx - 1];
     }
-    if (local_x == blockDim.x - 1 && local_y == blockDim.y - 1 && global_x < nx - 1 && global_y < ny - 1) {
-        shared_u[shared_jdx + 1][shared_idx + 1] = u[global_idx + nx + 1];
-        shared_v[shared_jdx + 1][shared_idx + 1] = v[global_idx + nx + 1];
+    
+    // Bottom-right
+    if (threadIdx.x == blockDim.x - 1 && threadIdx.y == blockDim.y - 1 && x < nx - 1 && y < ny - 1) {
+        s_u[ty+HALO][tx+HALO] = u[global_idx + nx + 1];
+        s_v[ty+HALO][tx+HALO] = v[global_idx + nx + 1];
     }
-
-    // Synchronize to ensure all threads have loaded shared memory
+    
+    // Synchronize to ensure all data is loaded
     __syncthreads();
-
-    // Compute neighbor average for non-border threads
-    if (global_x > 0 && global_x < nx - 1 && global_y > 0 && global_y < ny - 1) {
+    
+    // Compute averages only for interior threads
+    if (x > 0 && x < nx - 1 && y > 0 && y < ny - 1) {
+        // Compute uAvg using 3x3 neighborhood with weighted average
         uAvg[global_idx] = (
-            shared_u[shared_jdx - 1][shared_idx - 1] / 12 + shared_u[shared_jdx][shared_idx - 1] / 6 + shared_u[shared_jdx + 1][shared_idx - 1] / 12 +
-            shared_u[shared_jdx - 1][shared_idx] / 6 + shared_u[shared_jdx + 1][shared_idx] / 6 +
-            shared_u[shared_jdx - 1][shared_idx + 1] / 12 + shared_u[shared_jdx][shared_idx + 1] / 6 + shared_u[shared_jdx + 1][shared_idx + 1] / 12
+            s_u[ty-1][tx-1] / 12.0 + 
+            s_u[ty-1][tx]   / 6.0  + 
+            s_u[ty-1][tx+1] / 12.0 + 
+            s_u[ty][tx-1]   / 6.0  + 
+            s_u[ty][tx+1]   / 6.0  + 
+            s_u[ty+1][tx-1] / 12.0 + 
+            s_u[ty+1][tx]   / 6.0  + 
+            s_u[ty+1][tx+1] / 12.0
         );
-
+        
+        // Compute vAvg using 3x3 neighborhood with weighted average
         vAvg[global_idx] = (
-            shared_v[shared_jdx - 1][shared_idx - 1] / 12 + shared_v[shared_jdx][shared_idx - 1] / 6 + shared_v[shared_jdx + 1][shared_idx - 1] / 12 +
-            shared_v[shared_jdx - 1][shared_idx] / 6 + shared_v[shared_jdx + 1][shared_idx] / 6 +
-            shared_v[shared_jdx - 1][shared_idx + 1] / 12 + shared_v[shared_jdx][shared_idx + 1] / 6 + shared_v[shared_jdx + 1][shared_idx + 1] / 12
+            s_v[ty-1][tx-1] / 12.0 + 
+            s_v[ty-1][tx]   / 6.0  + 
+            s_v[ty-1][tx+1] / 12.0 + 
+            s_v[ty][tx-1]   / 6.0  + 
+            s_v[ty][tx+1]   / 6.0  + 
+            s_v[ty+1][tx-1] / 12.0 + 
+            s_v[ty+1][tx]   / 6.0  + 
+            s_v[ty+1][tx+1] / 12.0
         );
     }
 }
