@@ -142,9 +142,10 @@ void computeDerivatives(const Mat& im1, const Mat& im2, Mat& ix, Mat& iy, Mat& i
     it = ft1 + ft2;
 }
 
-__global__ void compute_neighbor_average(double* __restrict__ u, double* __restrict__ v, 
-                            double* __restrict__ uAvg, double* __restrict__ vAvg,
-                               const int nx, const int ny) {     
+__global__ void fused_horn_schunk(double* __restrict__ u, double* __restrict__ v,
+                                 double* __restrict__ Ix, double* __restrict__ Iy, 
+                                 double* __restrict__ It,
+                                 double alpha, const int nx, const int ny) {     
     // Define halo width
     constexpr int HALO = 1;
 
@@ -195,25 +196,21 @@ __global__ void compute_neighbor_average(double* __restrict__ u, double* __restr
     }
     
     // Corner halos
-    // Top-left
     if (threadIdx.x == 0 && threadIdx.y == 0 && x > 0 && y > 0) {
         s_u[ty-HALO][tx-HALO] = u[global_idx - nx - 1];
         s_v[ty-HALO][tx-HALO] = v[global_idx - nx - 1];
     }
     
-    // Top-right
     if (threadIdx.x == blockDim.x - 1 && threadIdx.y == 0 && x < nx - 1 && y > 0) {
         s_u[ty-HALO][tx+HALO] = u[global_idx - nx + 1];
         s_v[ty-HALO][tx+HALO] = v[global_idx - nx + 1];
     }
     
-    // Bottom-left
     if (threadIdx.x == 0 && threadIdx.y == blockDim.y - 1 && x > 0 && y < ny - 1) {
         s_u[ty+HALO][tx-HALO] = u[global_idx + nx - 1];
         s_v[ty+HALO][tx-HALO] = v[global_idx + nx - 1];
     }
     
-    // Bottom-right
     if (threadIdx.x == blockDim.x - 1 && threadIdx.y == blockDim.y - 1 && x < nx - 1 && y < ny - 1) {
         s_u[ty+HALO][tx+HALO] = u[global_idx + nx + 1];
         s_v[ty+HALO][tx+HALO] = v[global_idx + nx + 1];
@@ -222,10 +219,10 @@ __global__ void compute_neighbor_average(double* __restrict__ u, double* __restr
     // Synchronize to ensure all data is loaded
     __syncthreads();
     
-    // Compute averages only for interior threads
+    // Compute flow updates only for interior points
     if (x > 0 && x < nx - 1 && y > 0 && y < ny - 1) {
-        // Compute uAvg using 3x3 neighborhood with weighted average
-        uAvg[global_idx] = (
+        // First compute weighted averages
+        double uAvg = (
             s_u[ty-1][tx-1] / 12.0 + 
             s_u[ty-1][tx]   / 6.0  + 
             s_u[ty-1][tx+1] / 12.0 + 
@@ -236,8 +233,7 @@ __global__ void compute_neighbor_average(double* __restrict__ u, double* __restr
             s_u[ty+1][tx+1] / 12.0
         );
         
-        // Compute vAvg using 3x3 neighborhood with weighted average
-        vAvg[global_idx] = (
+        double vAvg = (
             s_v[ty-1][tx-1] / 12.0 + 
             s_v[ty-1][tx]   / 6.0  + 
             s_v[ty-1][tx+1] / 12.0 + 
@@ -247,28 +243,18 @@ __global__ void compute_neighbor_average(double* __restrict__ u, double* __restr
             s_v[ty+1][tx]   / 6.0  + 
             s_v[ty+1][tx+1] / 12.0
         );
-    }
-}
 
-__global__ void horn_schunk(double* __restrict__ u, double* __restrict__ v, 
-                            double* __restrict__ uAvg, double* __restrict__ vAvg,
-                            double* __restrict__ Ix, double* __restrict__ Iy, double* __restrict__ It,
-                               double alpha, const int nx, const int ny) { 
-    const int global_x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int global_y = blockIdx.y * blockDim.y + threadIdx.y;
-    const int idx = global_y * nx + global_x;  
-    
-    if (global_x < nx && global_y < ny) {
-        double ix = Ix[idx];
-        double iy = Iy[idx];
-        double it = It[idx];
-        double uAvgVal = uAvg[idx];
-        double vAvgVal = vAvg[idx];
+        // Then compute Horn-Schunck update
+        double ix = Ix[global_idx];
+        double iy = Iy[global_idx];
+        double it = It[global_idx];
 
         double denom = alpha * alpha + ix * ix + iy * iy;
-        double p = (ix * uAvgVal + iy * vAvgVal + it);
-        u[idx] = uAvgVal - ix * (p / denom);
-        v[idx] = vAvgVal - iy * (p / denom);
+        double p = (ix * uAvg + iy * vAvg + it);
+        
+        // Write final results directly
+        u[global_idx] = uAvg - ix * (p / denom);
+        v[global_idx] = vAvg - iy * (p / denom);
     }
 }
 
@@ -283,25 +269,28 @@ double calculate_roofline(double arithmetic_intensity) {
 
 // Modify the analyze_performance function to return the metrics
 tuple<double, double, double> analyze_performance(int nx, int ny, int iterations, double elapsed_time) {
-    // Calculate total pixels processed
     size_t total_pixels = nx * ny;
     
-    // Calculate FLOPs
-    // compute_neighbor_average: ~16 FLOPs per pixel
-    // horn_schunk: ~10 FLOPs per pixel
-    double flops_per_pixel = 26.0;
-    double total_flops = total_pixels * flops_per_pixel * iterations;
+    // Fused kernel FLOPs per pixel:
+    // - Averages computation: 22 FLOPs
+    // - Horn-Schunck update: 13 FLOPs
+    // Total: 35 FLOPs per pixel
+    // NOT CORRECT
+    double flops_per_iteration = 35.0 * total_pixels;
+    double total_flops = flops_per_iteration * iterations;
     
-    // Calculate memory operations
-    // Reads: Ix, Iy, It, uAvg, vAvg, u, v (7 doubles)
-    // Writes: u_new, v_new (2 doubles)
-    size_t bytes_per_pixel = 9 * sizeof(double);  // 9 doubles per pixel
-    double total_bytes = total_pixels * bytes_per_pixel * iterations;
+    // Memory operations per iteration:
+    // - Reads: u, v, Ix, Iy, It (5 doubles)
+    // - Writes: u_new, v_new (2 doubles)
+    // Total: 7 doubles per pixel per iteration
+    // NOT CORRECT
+    size_t bytes_per_pixel_per_iteration = 7 * sizeof(double);
+    double total_bytes = total_pixels * bytes_per_pixel_per_iteration * iterations;
     
     // Calculate metrics
     double arithmetic_intensity = total_flops / total_bytes;
-    double achieved_tflops = total_flops / (elapsed_time * 1e12);  // Convert to TFLOPS
-    double peak_tflops = calculate_roofline(arithmetic_intensity) / 1e12;  // Convert to TFLOPS
+    double achieved_tflops = total_flops / (elapsed_time * 1e12);
+    double peak_tflops = calculate_roofline(arithmetic_intensity) / 1e12;
     
     return make_tuple(achieved_tflops, arithmetic_intensity, peak_tflops);
 }
@@ -379,17 +368,13 @@ int main(int argc, char* argv[]) {
         GPU_ERROR = cudaMemcpy(ItDevice, ItHost.data(), size_bytes, cudaMemcpyHostToDevice);
 
         // Allocate device memory for results
-        double *u_d, *v_d, *uAvg_d, *vAvg_d;
+        double *u_d, *v_d;
         GPU_ERROR = cudaMalloc(&u_d, size_bytes);
         GPU_ERROR = cudaMalloc(&v_d, size_bytes);
-        GPU_ERROR = cudaMalloc(&uAvg_d, size_bytes);
-        GPU_ERROR = cudaMalloc(&vAvg_d, size_bytes);
 
         // Initialize device memory to zero
         GPU_ERROR = cudaMemset(u_d, 0, size_bytes);
         GPU_ERROR = cudaMemset(v_d, 0, size_bytes);
-        GPU_ERROR = cudaMemset(uAvg_d, 0, size_bytes);
-        GPU_ERROR = cudaMemset(vAvg_d, 0, size_bytes);
 
         // Set up grid and block dimensions
         int BLOCK_DIM_X = 16;
@@ -405,13 +390,12 @@ int main(int argc, char* argv[]) {
         // Start timing
         GPU_ERROR = cudaEventRecord(start);
 
-        // Compute optical flow
+        // Compute optical flow with fused kernel
         int iterations = 200;
         double alpha = 1;
         
         for(int iter = 0; iter < iterations; iter++) {
-            compute_neighbor_average<<<grid, block>>>(u_d, v_d, uAvg_d, vAvg_d, nx, ny);
-            horn_schunk<<<grid, block>>>(u_d, v_d, uAvg_d, vAvg_d, IxDevice, IyDevice, ItDevice, alpha, nx, ny);
+            fused_horn_schunk<<<grid, block>>>(u_d, v_d, IxDevice, IyDevice, ItDevice, alpha, nx, ny);
         }
         
         // Stop timing
@@ -428,13 +412,8 @@ int main(int argc, char* argv[]) {
         // Print performance table
         printf("\nGrid Size | TFLOPS | AI | Peak TFLOPS | Time(s) | Iterations\n");
         printf("---------|--------|----|-----------  |---------|------------|\n");
-        printf("%4dx%4d | %6.6f | %6.6f | %6.6f | %7.3f | %10d |\n",
+        printf("%4dx%4d | %6.6f | %6.6f | %6.6f | %7.6f | %10d |\n",
                nx, ny, measured_tflops, ai, peak_tflops, elapsed_time_s, iterations);
-        
-        // Additional bottleneck information
-        printf("Bottleneck: %s\n", 
-               (PEAK_MEMORY_BANDWIDTH * ai < PEAK_FLOP_RATE ? "Memory" : "Compute"));
-        printf("Efficiency: %.2f%%\n", (measured_tflops / peak_tflops) * 100.0);
 
         // Copy results back to host
         vector<double> u_result(nx * ny);
@@ -464,8 +443,6 @@ int main(int argc, char* argv[]) {
         cudaFree(ItDevice);
         cudaFree(u_d);
         cudaFree(v_d);
-        cudaFree(uAvg_d);
-        cudaFree(vAvg_d);
         
         // Force synchronization before next iteration
         cudaDeviceSynchronize();
