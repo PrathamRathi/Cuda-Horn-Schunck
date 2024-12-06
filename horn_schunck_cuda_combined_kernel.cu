@@ -47,8 +47,8 @@ using namespace cv;
 using namespace std;
 
 // Hardware specifications for roofline model
-const double PEAK_MEMORY_BANDWIDTH = 160e9;  // 160 GB/s
-const double PEAK_FLOP_RATE = 2.0e12;       // 2.0 TFLOP/s
+const double PEAK_MEMORY_BANDWIDTH = 400e9;  // 400 GB/s
+const double PEAK_FLOP_RATE = 2.5e12;       // 2.5 TFLOP/s
 
 // Calculate theoretical peak performance based on arithmetic intensity
 double calculate_roofline(double arithmetic_intensity) {
@@ -60,7 +60,7 @@ tuple<double, double, double> analyze_performance(int nx, int ny, int iterations
     // Calculate total pixels processed
     size_t total_pixels = nx * ny;
     
-    int haloComputations = ((gridDimX - 1) * nx + (gridDimY - 1) * ny); // number of points involved in halo computations
+    int haloComputations = (gridDimX * nx + gridDimY * ny); // number of points involved in halo computations
 
     // Calculate FLOPs
     // compute_neighbor_average: 30 FLOPs per pixel for computation + 8 for halo indexing math
@@ -173,10 +173,11 @@ void computeDerivatives(const Mat& im1, const Mat& im2, Mat& ix, Mat& iy, Mat& i
     it = ft1 + ft2;
 }
 
-__global__ void compute_neighbor_average(double* __restrict__ u, double* __restrict__ v, 
-                            double* __restrict__ uAvg, double* __restrict__ vAvg,
-                               const int nx, const int ny) {     
-    // Define halo width
+
+__global__ void horn_schunck(double* __restrict__ u, double* __restrict__ v, 
+                            double* __restrict__ Ix, double* __restrict__ Iy, double* __restrict__ It,
+                               double alpha, const int nx, const int ny) { 
+     // Define halo width
     constexpr int HALO = 1;
 
     // Shared memory dimensions including halos
@@ -253,10 +254,12 @@ __global__ void compute_neighbor_average(double* __restrict__ u, double* __restr
     // Synchronize to ensure all data is loaded
     __syncthreads();
     
+    double uAvg = 0;
+    double vAvg = 0;
     // Compute averages only for interior threads
     if (x > 0 && x < nx - 1 && y > 0 && y < ny - 1) {
         // Compute uAvg using 3x3 neighborhood with weighted average
-        uAvg[global_idx] = (
+        uAvg = (
             s_u[ty-1][tx-1] / 12.0 + 
             s_u[ty-1][tx]   / 6.0  + 
             s_u[ty-1][tx+1] / 12.0 + 
@@ -268,7 +271,7 @@ __global__ void compute_neighbor_average(double* __restrict__ u, double* __restr
         );
         
         // Compute vAvg using 3x3 neighborhood with weighted average
-        vAvg[global_idx] = (
+        vAvg = (
             s_v[ty-1][tx-1] / 12.0 + 
             s_v[ty-1][tx]   / 6.0  + 
             s_v[ty-1][tx+1] / 12.0 + 
@@ -279,27 +282,15 @@ __global__ void compute_neighbor_average(double* __restrict__ u, double* __restr
             s_v[ty+1][tx+1] / 12.0
         );
     }
-}
-
-__global__ void horn_schunck(double* __restrict__ u, double* __restrict__ v, 
-                            double* __restrict__ uAvg, double* __restrict__ vAvg,
-                            double* __restrict__ Ix, double* __restrict__ Iy, double* __restrict__ It,
-                               double alpha, const int nx, const int ny) { 
-    const int global_x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int global_y = blockIdx.y * blockDim.y + threadIdx.y;
-    const int idx = global_y * nx + global_x;  
-    
-    if (global_x < nx && global_y < ny) {
-        double ix = Ix[idx];
-        double iy = Iy[idx];
-        double it = It[idx];
-        double uAvgVal = uAvg[idx];
-        double vAvgVal = vAvg[idx];
+    if (x < nx && y < ny) {
+        double ix = Ix[global_idx];
+        double iy = Iy[global_idx];
+        double it = It[global_idx];
 
         double denom = alpha * alpha + ix * ix + iy * iy;
-        double p = (ix * uAvgVal + iy * vAvgVal + it);
-        u[idx] = uAvgVal - ix * (p / denom);
-        v[idx] = vAvgVal - iy * (p / denom);
+        double p = (ix * uAvg + iy * vAvg + it);
+        u[global_idx] = uAvg - ix * (p / denom);
+        v[global_idx] = vAvg - iy * (p / denom);
     }
 }
 
@@ -364,11 +355,6 @@ int main(int argc, char* argv[]) {
     GPU_ERROR = cudaMemcpy(uDevice, uHost.data(), size, cudaMemcpyHostToDevice);
     GPU_ERROR = cudaMemcpy(vDevice, vHost.data(), size, cudaMemcpyHostToDevice);
 
-    double *uAverage, *vAverage;
-    GPU_ERROR = cudaMalloc(&uAverage, size);
-    GPU_ERROR = cudaMalloc(&vAverage, size);
-    GPU_ERROR = cudaMemcpy(uAverage, uHost.data(), size, cudaMemcpyHostToDevice);
-    GPU_ERROR = cudaMemcpy(vAverage, vHost.data(), size, cudaMemcpyHostToDevice);
     cout << "Copied over average and flow vectors" << endl;
 
     // Compute optical flow
@@ -384,10 +370,7 @@ int main(int argc, char* argv[]) {
     // Start timing
     cudaEventRecord(start);
     while (currIteration < iterations){
-        compute_neighbor_average<<<grid, block>>>(uDevice, vDevice, uAverage, vAverage, nx, ny);      
-        GPU_ERROR = cudaDeviceSynchronize();
-
-        horn_schunck<<<grid, block>>>(uDevice, vDevice, uAverage, vAverage, IxDevice, IyDevice, ItDevice, alpha, nx, ny);
+        horn_schunck<<<grid, block>>>(uDevice, vDevice, IxDevice, IyDevice, ItDevice, alpha, nx, ny);
         GPU_ERROR = cudaDeviceSynchronize();
 
         currIteration++;
