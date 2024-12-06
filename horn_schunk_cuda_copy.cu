@@ -4,6 +4,7 @@
 #include <cmath>
 #include <fstream>
 #include <filesystem>
+#include <tuple>
 
 #ifdef USE_HIP
 
@@ -31,10 +32,17 @@
 #define cudaMemset              hipMemset
 #define cudaFreeHost            hipHostFree
 #define cudaSuccess             hipSuccess
+#define cudaEventCreate         hipEventCreate
+#define cudaEventRecord         hipEventRecord
+#define cudaEventSynchronize    hipEventSynchronize
+#define cudaEventElapsedTime    hipEventElapsedTime
+#define cudaEventDestroy        hipEventDestroy
+#define cudaEvent_t             hipEvent_t
 
 #else
 
 #include <cuda.h>
+#include <cuda_runtime.h>
 
 #endif
 
@@ -264,6 +272,40 @@ __global__ void horn_schunk(double* __restrict__ u, double* __restrict__ v,
     }
 }
 
+// Hardware specifications for roofline model
+const double PEAK_MEMORY_BANDWIDTH = 400e9;  // 400 GB/s
+const double PEAK_FLOP_RATE = 2.5e12;       // 2.5 TFLOP/s
+
+// Calculate theoretical peak performance based on arithmetic intensity
+double calculate_roofline(double arithmetic_intensity) {
+    return min(PEAK_FLOP_RATE, PEAK_MEMORY_BANDWIDTH * arithmetic_intensity);
+}
+
+// Modify the analyze_performance function to return the metrics
+tuple<double, double, double> analyze_performance(int nx, int ny, int iterations, double elapsed_time) {
+    // Calculate total pixels processed
+    size_t total_pixels = nx * ny;
+    
+    // Calculate FLOPs
+    // compute_neighbor_average: ~16 FLOPs per pixel
+    // horn_schunk: ~10 FLOPs per pixel
+    double flops_per_pixel = 26.0;
+    double total_flops = total_pixels * flops_per_pixel * iterations;
+    
+    // Calculate memory operations
+    // Reads: Ix, Iy, It, uAvg, vAvg, u, v (7 doubles)
+    // Writes: u_new, v_new (2 doubles)
+    size_t bytes_per_pixel = 9 * sizeof(double);  // 9 doubles per pixel
+    double total_bytes = total_pixels * bytes_per_pixel * iterations;
+    
+    // Calculate metrics
+    double arithmetic_intensity = total_flops / total_bytes;
+    double achieved_tflops = total_flops / (elapsed_time * 1e12);  // Convert to TFLOPS
+    double peak_tflops = calculate_roofline(arithmetic_intensity) / 1e12;  // Convert to TFLOPS
+    
+    return make_tuple(achieved_tflops, arithmetic_intensity, peak_tflops);
+}
+
 // Main function demonstrating usage
 int main(int argc, char* argv[]) {
     cout << "Running Horn-Schunck optical flow..." << endl;
@@ -273,195 +315,161 @@ int main(int argc, char* argv[]) {
     string outputname = argv[3];
 
     // Load two consecutive frames
-    Mat frame1 = imread(filename1, 0);
-    Mat frame2 = imread(filename2, 0);
+    Mat frame1_original = imread(filename1, 0);
+    Mat frame2_original = imread(filename2, 0);
    
-    if (frame1.empty() || frame2.empty()) {
+    if (frame1_original.empty() || frame2_original.empty()) {
         cerr << "Error loading images!" << endl;
         cerr << "Make sure " << filename1 << " and " << filename2 << " exist in: " << filesystem::current_path() << endl;
         return -1;
     }
-   
-    cout << "Loaded images - Frame1: " << frame1.size() << " Frame2: " << frame2.size() << endl;
-    
-    // Image size and grid sizes
-    cudaError_t GPU_ERROR;
-    int ny = frame1.rows;
-    int nx = frame1.cols;
-    size_t size = nx * ny * sizeof(double);
-    int BLOCK_DIM_X = 16;
-    int BLOCK_DIM_Y = 16;
-    dim3 block(BLOCK_DIM_X, BLOCK_DIM_Y);
 
-    // Setup for streams and chunked memory
-    const int k = 10;  // number of streams
-    size_t chunk_size = (nx * ny + k - 1) / k;  // elements per chunk
-    size_t chunk_bytes = chunk_size * sizeof(double);
-
-    // Validate chunk size
-    cout << "Total size: " << nx * ny << ", Chunk size: " << chunk_size << ", Number of chunks: " << k << endl;
-    if (chunk_size * k < nx * ny) {
-        cerr << "Error: Chunks don't cover entire data" << endl;
-        return -1;
-    }
-
-    // Calculate grid dimensions for chunks
-    size_t chunk_rows = (chunk_size + nx - 1) / nx;  // Calculate rows for this chunk
-    dim3 chunk_grid((nx + block.x - 1) / block.x,
-                    (chunk_rows + block.y - 1) / block.y);
+    // Define sizes to test
+    vector<int> test_sizes = {128, 256, 512};  // Test smaller sizes first
     
-    cout << "chunk grid x dim:" << chunk_grid.x << ", chunk grid y dim:" << chunk_grid.y << endl;
+    for (int size : test_sizes) {
+        cout << "\nProcessing size: " << size << "x" << size << endl;
+        
+        // Resize images
+        Mat frame1, frame2;
+        resize(frame1_original, frame1, Size(size, size));
+        resize(frame2_original, frame2, Size(size, size));
+        
+        cout << "Resized images - Frame1: " << frame1.size() << " Frame2: " << frame2.size() << endl;
+        
+        // Image size and grid sizes
+        cudaError_t GPU_ERROR;
+        int ny = frame1.rows;
+        int nx = frame1.cols;
+        size_t size_bytes = nx * ny * sizeof(double);
 
-    // Arrays of device pointers for each chunk
-    double **u_d = new double*[k];
-    double **v_d = new double*[k];
-    double **uAvg_d = new double*[k];
-    double **vAvg_d = new double*[k];
-    
-    // Arrays of pinned host memory for each chunk
-    double **u_h = new double*[k];
-    double **v_h = new double*[k];
-    
-    // Create streams and allocate memory for each chunk
-    cudaStream_t *streams = new cudaStream_t[k];
-    for(int i = 0; i < k; i++) {
-        GPU_ERROR = cudaStreamCreate(&streams[i]);
+        // Compute image derivatives
+        Mat IxMat, IyMat, ItMat;
+        computeDerivatives(frame1, frame2, IxMat, IyMat, ItMat);
+
+        // Convert derivatives to vectors
+        vector<double> IxHost = matToVector<double>(IxMat);
+        vector<double> IyHost = matToVector<double>(IyMat);
+        vector<double> ItHost = matToVector<double>(ItMat);
+
+        double *IxDevice, *IyDevice, *ItDevice;
+        // Allocate memory on device
+        GPU_ERROR = cudaMalloc(&IxDevice, size_bytes);
         if (GPU_ERROR != cudaSuccess) {
-            cerr << "Failed to create stream " << i << endl;
-            return -1;
+            cerr << "Failed to allocate Ix device memory" << endl;
+            continue;  // Skip to next size if allocation fails
         }
-        
-        // Allocate device memory for each chunk
-        GPU_ERROR = cudaMalloc((void**) &u_d[i], chunk_bytes);
-        GPU_ERROR = cudaMalloc((void**) &v_d[i], chunk_bytes);
-        GPU_ERROR = cudaMalloc((void**) &uAvg_d[i], chunk_bytes);
-        GPU_ERROR = cudaMalloc((void**) &vAvg_d[i], chunk_bytes);
-        
+        GPU_ERROR = cudaMalloc(&IyDevice, size_bytes);
+        if (GPU_ERROR != cudaSuccess) {
+            cudaFree(IxDevice);
+            cerr << "Failed to allocate Iy device memory" << endl;
+            continue;
+        }
+        GPU_ERROR = cudaMalloc(&ItDevice, size_bytes);
+        if (GPU_ERROR != cudaSuccess) {
+            cudaFree(IxDevice);
+            cudaFree(IyDevice);
+            cerr << "Failed to allocate It device memory" << endl;
+            continue;
+        }
+
+        // Copy derivatives to device
+        GPU_ERROR = cudaMemcpy(IxDevice, IxHost.data(), size_bytes, cudaMemcpyHostToDevice);
+        GPU_ERROR = cudaMemcpy(IyDevice, IyHost.data(), size_bytes, cudaMemcpyHostToDevice);
+        GPU_ERROR = cudaMemcpy(ItDevice, ItHost.data(), size_bytes, cudaMemcpyHostToDevice);
+
+        // Allocate device memory for results
+        double *u_d, *v_d, *uAvg_d, *vAvg_d;
+        GPU_ERROR = cudaMalloc(&u_d, size_bytes);
+        GPU_ERROR = cudaMalloc(&v_d, size_bytes);
+        GPU_ERROR = cudaMalloc(&uAvg_d, size_bytes);
+        GPU_ERROR = cudaMalloc(&vAvg_d, size_bytes);
+
         // Initialize device memory to zero
-        GPU_ERROR = cudaMemset(u_d[i], 0, chunk_bytes);
-        GPU_ERROR = cudaMemset(v_d[i], 0, chunk_bytes);
-        GPU_ERROR = cudaMemset(uAvg_d[i], 0, chunk_bytes);
-        GPU_ERROR = cudaMemset(vAvg_d[i], 0, chunk_bytes);
+        GPU_ERROR = cudaMemset(u_d, 0, size_bytes);
+        GPU_ERROR = cudaMemset(v_d, 0, size_bytes);
+        GPU_ERROR = cudaMemset(uAvg_d, 0, size_bytes);
+        GPU_ERROR = cudaMemset(vAvg_d, 0, size_bytes);
+
+        // Set up grid and block dimensions
+        int BLOCK_DIM_X = 16;
+        int BLOCK_DIM_Y = 16;
+        dim3 block(BLOCK_DIM_X, BLOCK_DIM_Y);
+        dim3 grid((nx + block.x - 1) / block.x, (ny + block.y - 1) / block.y);
+
+        // Add timing variables
+        cudaEvent_t start, stop;
+        GPU_ERROR = cudaEventCreate(&start);
+        GPU_ERROR = cudaEventCreate(&stop);
         
-        // Allocate pinned host memory for each chunk
-        GPU_ERROR = cudaHostMalloc(&u_h[i], chunk_bytes);
-        GPU_ERROR = cudaHostMalloc(&v_h[i], chunk_bytes);
+        // Start timing
+        GPU_ERROR = cudaEventRecord(start);
+
+        // Compute optical flow
+        int iterations = 200;
+        double alpha = 1;
         
-        // Initialize host memory to zero
-        memset(u_h[i], 0, chunk_bytes);
-        memset(v_h[i], 0, chunk_bytes);
-    }
-
-    // Compute image derivatives
-    Mat IxMat, IyMat, ItMat;
-    computeDerivatives(frame1, frame2, IxMat, IyMat, ItMat);
-
-    // Convert derivatives to vectors
-    vector<double> IxHost = matToVector<double>(IxMat);
-    vector<double> IyHost = matToVector<double>(IyMat);
-    vector<double> ItHost = matToVector<double>(ItMat);
-
-    double *IxDevice, *IyDevice, *ItDevice;
-    // Allocate memory on device
-    GPU_ERROR = cudaMalloc(&IxDevice, size);
-    GPU_ERROR = cudaMalloc(&IyDevice, size);
-    GPU_ERROR = cudaMalloc(&ItDevice, size);
-    
-    // Copy derivatives to device asynchronously
-    GPU_ERROR = cudaMemcpyAsync(IxDevice, IxHost.data(), size, cudaMemcpyHostToDevice, streams[0]);
-    GPU_ERROR = cudaMemcpyAsync(IyDevice, IyHost.data(), size, cudaMemcpyHostToDevice, streams[0]);
-    GPU_ERROR = cudaMemcpyAsync(ItDevice, ItHost.data(), size, cudaMemcpyHostToDevice, streams[0]);
-
-    // Ensure derivatives are copied before starting computation
-    GPU_ERROR = cudaStreamSynchronize(streams[0]);
-
-    cout << "Finished derivatives transfer" << endl;
-
-    // Compute optical flow
-    int currIteration = 0;
-    int iterations = 200;
-    double alpha = 1;
-    while (currIteration < iterations) {
-        for(int i = 0; i < k; i++) {
-            size_t start_idx = i * chunk_size;
-            size_t current_chunk_size = min(chunk_size, nx * ny - start_idx);
-            
-            compute_neighbor_average<<<chunk_grid, block, 0, streams[i]>>>(
-                u_d[i], v_d[i], uAvg_d[i], vAvg_d[i], nx, ny);      
-
-            horn_schunk<<<chunk_grid, block, 0, streams[i]>>>(
-                u_d[i], v_d[i], uAvg_d[i], vAvg_d[i], 
-                IxDevice + start_idx, IyDevice + start_idx, ItDevice + start_idx, 
-                alpha, nx, ny);
+        for(int iter = 0; iter < iterations; iter++) {
+            compute_neighbor_average<<<grid, block>>>(u_d, v_d, uAvg_d, vAvg_d, nx, ny);
+            horn_schunk<<<grid, block>>>(u_d, v_d, uAvg_d, vAvg_d, IxDevice, IyDevice, ItDevice, alpha, nx, ny);
         }
-        currIteration++;
-    }
-    cout << "Kernels finished" << endl;
-
-    // Copy over flow results to host
-    for(int i = 0; i < k; i++) {
-        size_t start_idx = i * chunk_size;
-        size_t current_chunk_size = min(chunk_size, nx * ny - start_idx);
         
-        GPU_ERROR = cudaMemcpyAsync(u_h[i], u_d[i], current_chunk_size * sizeof(double), cudaMemcpyDeviceToHost, streams[i]);
-        GPU_ERROR = cudaMemcpyAsync(v_h[i], v_d[i], current_chunk_size * sizeof(double), cudaMemcpyDeviceToHost, streams[i]);
-    }
-
-    // Synchronize all streams
-    for (int i = 0; i < k; i++) {
-        GPU_ERROR = cudaStreamSynchronize(streams[i]);
-    }
-    cout << "Copied results" << endl;
-
-    // Combine results from all chunks
-    vector<double> u_result(nx * ny);
-    vector<double> v_result(nx * ny);
-    for(int i = 0; i < k; i++) {
-        size_t start_idx = i * chunk_size;
-        size_t current_chunk_size = min(chunk_size, nx * ny - start_idx);
-        memcpy(&u_result[start_idx], u_h[i], current_chunk_size * sizeof(double));
-        memcpy(&v_result[start_idx], v_h[i], current_chunk_size * sizeof(double));
-    }
-
-    // Visualize optical flow
-    Mat img_color, flowX, flowY;
-    cvtColor(frame1, img_color, COLOR_GRAY2BGR);
-    flowX = vectorToMat<double>(u_result, ny, nx, CV_64F);
-    flowY = vectorToMat<double>(v_result, ny, nx, CV_64F); 
-    drawOpticalFlow(flowX, flowY, img_color);
-
-    Mat flow_vis;
-    visualizeFlowHSV(flowX, flowY, flow_vis);
-
-    cout << "Writing optical flow images." << endl;
-    imwrite("outputs/CUDA_optical_flow_" + outputname + ".png", img_color);
-    imwrite("outputs/CUDA_optical_flow_hsv_" + outputname + ".png", flow_vis);
-
-    // Cleanup derivative arrays first
-    GPU_ERROR = cudaFree(IxDevice);
-    GPU_ERROR = cudaFree(IyDevice);
-    GPU_ERROR = cudaFree(ItDevice);
-
-    // Cleanup chunk arrays and streams
-    for(int i = 0; i < k; i++) {
-        GPU_ERROR = cudaFree(u_d[i]);
-        GPU_ERROR = cudaFree(v_d[i]);
-        GPU_ERROR = cudaFree(uAvg_d[i]);
-        GPU_ERROR = cudaFree(vAvg_d[i]);
+        // Stop timing
+        GPU_ERROR = cudaEventRecord(stop);
+        GPU_ERROR = cudaEventSynchronize(stop);
         
-        GPU_ERROR = cudaFreeHost(u_h[i]);
-        GPU_ERROR = cudaFreeHost(v_h[i]);
+        float elapsed_time_ms;
+        GPU_ERROR = cudaEventElapsedTime(&elapsed_time_ms, start, stop);
+        double elapsed_time_s = elapsed_time_ms / 1000.0;
         
-        GPU_ERROR = cudaStreamDestroy(streams[i]);
+        // Get performance metrics
+        auto [measured_tflops, ai, peak_tflops] = analyze_performance(nx, ny, iterations, elapsed_time_s);
+        
+        // Print performance table
+        printf("\nGrid Size | TFLOPS | AI | Peak TFLOPS | Time(s) | Iterations\n");
+        printf("---------|--------|----|-----------  |---------|------------|\n");
+        printf("%4dx%4d | %6.6f | %6.6f | %6.6f | %7.3f | %10d |\n",
+               nx, ny, measured_tflops, ai, peak_tflops, elapsed_time_s, iterations);
+        
+        // Additional bottleneck information
+        printf("Bottleneck: %s\n", 
+               (PEAK_MEMORY_BANDWIDTH * ai < PEAK_FLOP_RATE ? "Memory" : "Compute"));
+        printf("Efficiency: %.2f%%\n", (measured_tflops / peak_tflops) * 100.0);
+
+        // Copy results back to host
+        vector<double> u_result(nx * ny);
+        vector<double> v_result(nx * ny);
+        GPU_ERROR = cudaMemcpy(u_result.data(), u_d, size_bytes, cudaMemcpyDeviceToHost);
+        GPU_ERROR = cudaMemcpy(v_result.data(), v_d, size_bytes, cudaMemcpyDeviceToHost);
+
+        // Visualize and save results
+        Mat img_color, flowX, flowY;
+        cvtColor(frame1, img_color, COLOR_GRAY2BGR);
+        flowX = vectorToMat<double>(u_result, ny, nx, CV_64F);
+        flowY = vectorToMat<double>(v_result, ny, nx, CV_64F); 
+        drawOpticalFlow(flowX, flowY, img_color);
+
+        Mat flow_vis;
+        visualizeFlowHSV(flowX, flowY, flow_vis);
+
+        string size_str = to_string(size);
+        imwrite("outputs/CUDA_optical_flow_" + outputname + "_" + size_str + "x" + size_str + ".png", img_color);
+        imwrite("outputs/CUDA_optical_flow_hsv_" + outputname + "_" + size_str + "x" + size_str + ".png", flow_vis);
+
+        // Cleanup
+        cudaEventDestroy(start);
+        cudaEventDestroy(stop);
+        cudaFree(IxDevice);
+        cudaFree(IyDevice);
+        cudaFree(ItDevice);
+        cudaFree(u_d);
+        cudaFree(v_d);
+        cudaFree(uAvg_d);
+        cudaFree(vAvg_d);
+        
+        // Force synchronization before next iteration
+        cudaDeviceSynchronize();
     }
-    
-    delete[] u_d;
-    delete[] v_d;
-    delete[] uAvg_d;
-    delete[] vAvg_d;
-    delete[] u_h;
-    delete[] v_h;
-    delete[] streams;
 
     return 0;
 }
