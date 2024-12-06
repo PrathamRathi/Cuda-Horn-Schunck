@@ -38,6 +38,9 @@
 #define cudaEventElapsedTime    hipEventElapsedTime
 #define cudaEventDestroy        hipEventDestroy
 #define cudaEvent_t             hipEvent_t
+#define cudaHostAlloc           hipHostMalloc
+#define cudaHostAllocDefault    hipHostMallocDefault
+#define cudaMemcpyHostToHost    hipMemcpyHostToHost
 
 #else
 
@@ -48,6 +51,37 @@
 
 using namespace cv;
 using namespace std;
+
+// Hardware specifications for roofline model
+const double PEAK_MEMORY_BANDWIDTH = 160e9;  // 160 GB/s
+const double PEAK_FLOP_RATE = 2.0e12;       // 2.0 TFLOP/s
+
+// Calculate theoretical peak performance based on arithmetic intensity
+double calculate_roofline(double arithmetic_intensity) {
+    return min(PEAK_FLOP_RATE, PEAK_MEMORY_BANDWIDTH * arithmetic_intensity);
+}
+
+// Modify the analyze_performance function to return the metrics
+tuple<double, double, double> analyze_performance(int nx, int ny, int iterations, double elapsed_time, int gridDimX, int gridDimY) {
+    size_t total_pixels = nx * ny;
+
+    int haloComputations = ny * (gridDimX - 1) + nx * (gridDimY - 1);
+
+    // FLOPs calculation (keeping 45 FLOPs per pixel as verified)
+    double flops_per_pixel = 45.0;
+    double total_flops = total_pixels * flops_per_pixel * iterations + (8 * haloComputations * iterations);
+    
+    // Corrected memory operations (23 doubles per pixel)
+    size_t bytes_per_pixel = 23 * sizeof(double); 
+    double total_bytes = total_pixels * bytes_per_pixel * iterations + (4 * haloComputations * iterations);
+    
+    // Calculate metrics
+    double arithmetic_intensity = total_flops / total_bytes;
+    double achieved_tflops = total_flops / (elapsed_time * 1e12);
+    double peak_tflops = calculate_roofline(arithmetic_intensity) / 1e12;
+    
+    return make_tuple(achieved_tflops, arithmetic_intensity, peak_tflops);
+}
 
 // Visualize optical flow
 void drawOpticalFlow(const Mat& flowX, const Mat& flowY, Mat& image, int scale = 3, int step = 16) {
@@ -258,43 +292,6 @@ __global__ void fused_horn_schunk(double* __restrict__ u, double* __restrict__ v
     }
 }
 
-// Hardware specifications for roofline model
-const double PEAK_MEMORY_BANDWIDTH = 400e9;  // 400 GB/s
-const double PEAK_FLOP_RATE = 2.5e12;       // 2.5 TFLOP/s
-
-// Calculate theoretical peak performance based on arithmetic intensity
-double calculate_roofline(double arithmetic_intensity) {
-    return min(PEAK_FLOP_RATE, PEAK_MEMORY_BANDWIDTH * arithmetic_intensity);
-}
-
-// Modify the analyze_performance function to return the metrics
-tuple<double, double, double> analyze_performance(int nx, int ny, int iterations, double elapsed_time) {
-    size_t total_pixels = nx * ny;
-    
-    // Fused kernel FLOPs per pixel:
-    // - Averages computation: 22 FLOPs
-    // - Horn-Schunck update: 13 FLOPs
-    // Total: 35 FLOPs per pixel
-    // NOT CORRECT
-    double flops_per_iteration = 35.0 * total_pixels;
-    double total_flops = flops_per_iteration * iterations;
-    
-    // Memory operations per iteration:
-    // - Reads: u, v, Ix, Iy, It (5 doubles)
-    // - Writes: u_new, v_new (2 doubles)
-    // Total: 7 doubles per pixel per iteration
-    // NOT CORRECT
-    size_t bytes_per_pixel_per_iteration = 7 * sizeof(double);
-    double total_bytes = total_pixels * bytes_per_pixel_per_iteration * iterations;
-    
-    // Calculate metrics
-    double arithmetic_intensity = total_flops / total_bytes;
-    double achieved_tflops = total_flops / (elapsed_time * 1e12);
-    double peak_tflops = calculate_roofline(arithmetic_intensity) / 1e12;
-    
-    return make_tuple(achieved_tflops, arithmetic_intensity, peak_tflops);
-}
-
 // Main function demonstrating usage
 int main(int argc, char* argv[]) {
     cout << "Running Horn-Schunck optical flow..." << endl;
@@ -331,15 +328,53 @@ int main(int argc, char* argv[]) {
         int ny = frame1.rows;
         int nx = frame1.cols;
         size_t size_bytes = nx * ny * sizeof(double);
+        int BLOCK_DIM_X = 16;
+        int BLOCK_DIM_Y = 16;
+        dim3 block(BLOCK_DIM_X, BLOCK_DIM_Y);
+        int gridDimX = (nx + block.x - 1) / block.x;
+        int gridDimY = (ny + block.y - 1) / block.y;
+        dim3 grid(gridDimX, gridDimY);
+        cout << "grid x dim: " << gridDimX << ", grid y dim: " << gridDimY << endl;
 
         // Compute image derivatives
         Mat IxMat, IyMat, ItMat;
         computeDerivatives(frame1, frame2, IxMat, IyMat, ItMat);
 
         // Convert derivatives to vectors
-        vector<double> IxHost = matToVector<double>(IxMat);
-        vector<double> IyHost = matToVector<double>(IyMat);
-        vector<double> ItHost = matToVector<double>(ItMat);
+        double *IxHost, *IyHost, *ItHost;
+        double *uHost, *vHost;
+
+        // Allocate pinned memory with error checking
+        GPU_ERROR = cudaHostAlloc(&IxHost, size_bytes, cudaHostAllocDefault);
+        if (GPU_ERROR != cudaSuccess) {
+            cerr << "Failed to allocate pinned memory for IxHost" << endl;
+            return -1;
+        }
+        GPU_ERROR = cudaHostAlloc(&IyHost, size_bytes, cudaHostAllocDefault);
+        if (GPU_ERROR != cudaSuccess) {
+            cerr << "Failed to allocate pinned memory for IyHost" << endl;
+            return -1;
+        }
+        GPU_ERROR = cudaHostAlloc(&ItHost, size_bytes, cudaHostAllocDefault);
+        if (GPU_ERROR != cudaSuccess) {
+            cerr << "Failed to allocate pinned memory for ItHost" << endl;
+            return -1;
+        }
+        GPU_ERROR = cudaHostAlloc(&uHost, size_bytes, cudaHostAllocDefault);
+        if (GPU_ERROR != cudaSuccess) {
+            cerr << "Failed to allocate pinned memory for uHost" << endl;
+            return -1;
+        }
+        GPU_ERROR = cudaHostAlloc(&vHost, size_bytes, cudaHostAllocDefault);
+        if (GPU_ERROR != cudaSuccess) {
+            cerr << "Failed to allocate pinned memory for vHost" << endl;
+            return -1;
+        }
+
+        // Copy data with error checking
+        GPU_ERROR = cudaMemcpy(IxHost, IxMat.ptr<double>(), size_bytes, cudaMemcpyHostToHost);
+        GPU_ERROR = cudaMemcpy(IyHost, IyMat.ptr<double>(), size_bytes, cudaMemcpyHostToHost);
+        GPU_ERROR = cudaMemcpy(ItHost, ItMat.ptr<double>(), size_bytes, cudaMemcpyHostToHost);
 
         double *IxDevice, *IyDevice, *ItDevice;
         // Allocate memory on device
@@ -363,9 +398,9 @@ int main(int argc, char* argv[]) {
         }
 
         // Copy derivatives to device
-        GPU_ERROR = cudaMemcpy(IxDevice, IxHost.data(), size_bytes, cudaMemcpyHostToDevice);
-        GPU_ERROR = cudaMemcpy(IyDevice, IyHost.data(), size_bytes, cudaMemcpyHostToDevice);
-        GPU_ERROR = cudaMemcpy(ItDevice, ItHost.data(), size_bytes, cudaMemcpyHostToDevice);
+        GPU_ERROR = cudaMemcpy(IxDevice, IxHost, size_bytes, cudaMemcpyHostToDevice);
+        GPU_ERROR = cudaMemcpy(IyDevice, IyHost, size_bytes, cudaMemcpyHostToDevice);
+        GPU_ERROR = cudaMemcpy(ItDevice, ItHost, size_bytes, cudaMemcpyHostToDevice);
 
         // Allocate device memory for results
         double *u_d, *v_d;
@@ -375,12 +410,6 @@ int main(int argc, char* argv[]) {
         // Initialize device memory to zero
         GPU_ERROR = cudaMemset(u_d, 0, size_bytes);
         GPU_ERROR = cudaMemset(v_d, 0, size_bytes);
-
-        // Set up grid and block dimensions
-        int BLOCK_DIM_X = 16;
-        int BLOCK_DIM_Y = 16;
-        dim3 block(BLOCK_DIM_X, BLOCK_DIM_Y);
-        dim3 grid((nx + block.x - 1) / block.x, (ny + block.y - 1) / block.y);
 
         // Add timing variables
         cudaEvent_t start, stop;
@@ -407,7 +436,7 @@ int main(int argc, char* argv[]) {
         double elapsed_time_s = elapsed_time_ms / 1000.0;
         
         // Get performance metrics
-        auto [measured_tflops, ai, peak_tflops] = analyze_performance(nx, ny, iterations, elapsed_time_s);
+        auto [measured_tflops, ai, peak_tflops] = analyze_performance(nx, ny, iterations, elapsed_time_s, gridDimX, gridDimY);
         
         // Print performance table
         printf("\nGrid Size | TFLOPS | AI | Peak TFLOPS | Time(s) | Iterations\n");
@@ -436,16 +465,49 @@ int main(int argc, char* argv[]) {
         imwrite("outputs/CUDA_optical_flow_hsv_" + outputname + "_" + size_str + "x" + size_str + ".png", flow_vis);
 
         // Cleanup
-        cudaEventDestroy(start);
-        cudaEventDestroy(stop);
-        cudaFree(IxDevice);
-        cudaFree(IyDevice);
-        cudaFree(ItDevice);
-        cudaFree(u_d);
-        cudaFree(v_d);
+        if (cudaEventDestroy(start) != cudaSuccess) {
+            cerr << "Error destroying start event" << endl;
+        }
+        if (cudaEventDestroy(stop) != cudaSuccess) {
+            cerr << "Error destroying stop event" << endl;
+        }
+        if (cudaFree(IxDevice) != cudaSuccess) {
+            cerr << "Error freeing IxDevice" << endl;
+        }
+        if (cudaFree(IyDevice) != cudaSuccess) {
+            cerr << "Error freeing IyDevice" << endl;
+        }
+        if (cudaFree(ItDevice) != cudaSuccess) {
+            cerr << "Error freeing ItDevice" << endl;
+        }
+        if (cudaFree(u_d) != cudaSuccess) {
+            cerr << "Error freeing u_d" << endl;
+        }
+        if (cudaFree(v_d) != cudaSuccess) {
+            cerr << "Error freeing v_d" << endl;
+        }
+
+        // Free pinned memory
+        if (cudaFreeHost(IxHost) != cudaSuccess) {
+            cerr << "Error freeing IxHost" << endl;
+        }
+        if (cudaFreeHost(IyHost) != cudaSuccess) {
+            cerr << "Error freeing IyHost" << endl;
+        }
+        if (cudaFreeHost(ItHost) != cudaSuccess) {
+            cerr << "Error freeing ItHost" << endl;
+        }
+        if (cudaFreeHost(uHost) != cudaSuccess) {
+            cerr << "Error freeing uHost" << endl;
+        }
+        if (cudaFreeHost(vHost) != cudaSuccess) {
+            cerr << "Error freeing vHost" << endl;
+        }
         
         // Force synchronization before next iteration
-        cudaDeviceSynchronize();
+        if (cudaDeviceSynchronize() != cudaSuccess) {
+            cerr << "Error in device synchronization" << endl;
+        }
     }
 
     return 0;
