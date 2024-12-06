@@ -6,7 +6,7 @@
 #SBATCH -p mi2104x             # Desired partition, used to be devel
 
 
-hipcc -x hip -O2 horn_schunk_cuda.cu -DUSE_HIP -o output_cuda.exe \
+hipcc -x hip -O2 horn_schunck_cuda.cu -DUSE_HIP -o output_cuda.exe \
     -I/home1/bustudent13/local/include/opencv4 \
     -L/home1/bustudent13/local/lib64 \
     -lopencv_core -lopencv_highgui -lopencv_imgproc -lopencv_imgcodecs -lopencv_video \

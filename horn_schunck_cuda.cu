@@ -46,6 +46,39 @@
 using namespace cv;
 using namespace std;
 
+// Hardware specifications for roofline model
+const double PEAK_MEMORY_BANDWIDTH = 400e9;  // 400 GB/s
+const double PEAK_FLOP_RATE = 2.5e12;       // 2.5 TFLOP/s
+
+// Calculate theoretical peak performance based on arithmetic intensity
+double calculate_roofline(double arithmetic_intensity) {
+    return min(PEAK_FLOP_RATE, PEAK_MEMORY_BANDWIDTH * arithmetic_intensity);
+}
+
+// Modify the analyze_performance function to return the metrics
+tuple<double, double, double> analyze_performance(int nx, int ny, int iterations, double elapsed_time, int gridDimX, int gridDimY) {
+    // Calculate total pixels processed
+    size_t total_pixels = nx * ny;
+    
+    int haloComputations = (gridDimX * nx + gridDimY * ny);
+
+    // Calculate FLOPs
+    // compute_neighbor_average: 30 FLOPs per pixel for computation + 8 for halo indexing math
+    // horn_schunk: 15 FLOPs per pixel
+    double flops_per_pixel = 45.0;
+    double total_flops = total_pixels * flops_per_pixel * iterations + (8 * haloComputations * iterations);
+    
+    // Calculate memory operations
+    size_t bytes_per_pixel = (22 + 7) * sizeof(double); 
+    double total_bytes = total_pixels * bytes_per_pixel * iterations + (4 * haloComputations * iterations);
+    
+    // Calculate metrics
+    double arithmetic_intensity = total_flops / total_bytes;
+    double achieved_tflops = total_flops / (elapsed_time * 1e12);  // Convert to TFLOPS
+    double peak_tflops = calculate_roofline(arithmetic_intensity) / 1e12;  // Convert to TFLOPS
+    
+    return make_tuple(achieved_tflops, arithmetic_intensity, peak_tflops);
+}
 
 // Visualize optical flow
 void drawOpticalFlow(const Mat& flowX, const Mat& flowY, Mat& image, int scale = 3, int step = 16) {
@@ -248,7 +281,7 @@ __global__ void compute_neighbor_average(double* __restrict__ u, double* __restr
     }
 }
 
-__global__ void horn_schunk(double* __restrict__ u, double* __restrict__ v, 
+__global__ void horn_schunck(double* __restrict__ u, double* __restrict__ v, 
                             double* __restrict__ uAvg, double* __restrict__ vAvg,
                             double* __restrict__ Ix, double* __restrict__ Iy, double* __restrict__ It,
                                double alpha, const int nx, const int ny) { 
@@ -298,9 +331,10 @@ int main(int argc, char* argv[]) {
     int BLOCK_DIM_X = 16;
     int BLOCK_DIM_Y = 16;
     dim3 block(BLOCK_DIM_X, BLOCK_DIM_Y);
-    dim3 grid((nx + block.x - 1) / block.x,
-              (ny + block.y - 1) / block.y);
-    cout << "grid x dim:" << (nx + block.x - 1) / block.x << ", grid y dim:" << (ny + block.y - 1) / block.y << endl;
+    int gridDimX = (nx + block.x - 1) / block.x;
+    int gridDimY = (ny + block.y - 1) / block.y;
+    dim3 grid(gridDimX, gridDimY);
+    cout << "grid x dim: " << gridDimX << ", grid y dim: " << gridDimY << endl;
 
    // Compute image derivatives
     Mat IxMat, IyMat, ItMat;
@@ -353,7 +387,7 @@ int main(int argc, char* argv[]) {
         compute_neighbor_average<<<grid, block>>>(uDevice, vDevice, uAverage, vAverage, nx, ny);      
         GPU_ERROR = cudaDeviceSynchronize();
 
-        horn_schunk<<<grid, block>>>(uDevice, vDevice, uAverage, vAverage, IxDevice, IyDevice, ItDevice, alpha, nx, ny);
+        horn_schunck<<<grid, block>>>(uDevice, vDevice, uAverage, vAverage, IxDevice, IyDevice, ItDevice, alpha, nx, ny);
         GPU_ERROR = cudaDeviceSynchronize();
 
         currIteration++;
@@ -366,6 +400,19 @@ int main(int argc, char* argv[]) {
     cudaEventElapsedTime(&elapsed_time_ms, start, stop);
     double elapsed_time_s = elapsed_time_ms / 1000.0;
     cout << "Kernels finished in " << elapsed_time_s << " seconds." << endl;
+
+    // Get performance metrics
+    auto [measured_tflops, ai, peak_tflops] = analyze_performance(nx, ny, iterations, elapsed_time_s, gridDimX, gridDimY);
+    
+    // Print performance table
+    printf("\nGrid Size | TFLOPS | AI | Peak TFLOPS | Time(s) | Iterations\n");
+    printf("---------|--------|----|-----------  |---------|------------|\n");
+    printf("%4dx%4d | %6.6f | %6.6f | %6.6f | %7.5f | %10d |\n",
+            nx, ny, measured_tflops, ai, peak_tflops, elapsed_time_s, iterations);
+    
+    // Additional bottleneck information
+    printf("Bottleneck: %s\n", 
+            (PEAK_MEMORY_BANDWIDTH * ai < PEAK_FLOP_RATE ? "Memory" : "Compute"));
 
     // Copy over flow results to host
     GPU_ERROR = cudaMemcpy(uHost.data(), uDevice, size, cudaMemcpyDeviceToHost);
