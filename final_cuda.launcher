@@ -24,3 +24,5 @@ srun ./output_cuda.exe images/car1.jpg images/car2.jpg car
 
 # images/eval-data/Basketball/frame10.png
 # images/eval-data/Basketball/frame11.png
+
+

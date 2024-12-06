@@ -4,6 +4,7 @@
 #include <cmath>
 #include <fstream>
 #include <filesystem>
+#include <chrono>
 
 #ifdef USE_HIP
 
@@ -24,6 +25,17 @@
 #define cudaMemcpyDeviceToHost  hipMemcpyDeviceToHost
 
 #define cudaError_t             hipError_t
+#define cudaStream_t            hipStream_t
+#define cudaStreamCreate        hipStreamCreate
+#define cudaStreamDestroy       hipStreamDestroy
+#define cudaStreamSynchronize   hipStreamSynchronize
+#define cudaFreeHost            hipHostFree
+#define cudaEventCreate         hipEventCreate
+#define cudaEventRecord         hipEventRecord
+#define cudaEventSynchronize    hipEventSynchronize
+#define cudaEventElapsedTime    hipEventElapsedTime
+#define cudaEventDestroy        hipEventDestroy
+#define cudaEvent_t             hipEvent_t
 
 #else
 
@@ -329,6 +341,14 @@ int main(int argc, char* argv[]) {
     int currIteration = 0;
     int iterations = 200;
     double alpha = 1;
+    
+    // Add timing variables
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    
+    // Start timing
+    cudaEventRecord(start);
     while (currIteration < iterations){
         compute_neighbor_average<<<grid, block>>>(uDevice, vDevice, uAverage, vAverage, nx, ny);      
         GPU_ERROR = cudaDeviceSynchronize();
@@ -338,7 +358,14 @@ int main(int argc, char* argv[]) {
 
         currIteration++;
     }
-    cout << "Kernels finished" << endl;
+    // Stop timing
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    
+    float elapsed_time_ms;
+    cudaEventElapsedTime(&elapsed_time_ms, start, stop);
+    double elapsed_time_s = elapsed_time_ms / 1000.0;
+    cout << "Kernels finished in " << elapsed_time_s << " seconds." << endl;
 
     // Copy over flow results to host
     GPU_ERROR = cudaMemcpy(uHost.data(), uDevice, size, cudaMemcpyDeviceToHost);
