@@ -26,3 +26,9 @@ srun ./output_cuda.exe images/car1.jpg images/car2.jpg car
 # images/eval-data/Basketball/frame11.png
 
 
+hipcc -x hip -O2 horn_schunck_cuda_mpi.cu -DUSE_HIP -o output_cuda_mpi.exe \
+    -I/home1/bustudent13/local/include/opencv4 \
+    -L/home1/bustudent13/local/lib64 \
+    -lopencv_core -lopencv_highgui -lopencv_imgproc -lopencv_imgcodecs -lopencv_video \
+    -std=c++17 \
+    -Wl,-rpath=/home1/bustudent13/local/lib64
