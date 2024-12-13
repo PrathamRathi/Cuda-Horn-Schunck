@@ -1,38 +1,24 @@
 #!/bin/bash
 
 #SBATCH -J launcher           # Job name
-#SBATCH -o mpijob.%j.out     # Name of stdout output file (%j expands to jobId)
-#SBATCH -e mpijob.%j.err     # Name of stderr output file (%j expands to jobId)
-#SBATCH -N 1                 # Total number of nodes requested
-#SBATCH -n 4                 # Total number of mpi tasks requested
-#SBATCH -t 00:03:00         # Run time (hh:mm:ss) - 3 minutes
-#SBATCH -p mi2104x          # Desired partition
-#SBATCH --cpus-per-task 16
+##SBATCH --exclusive
+#SBATCH -t 00:03:00           # Run time (hh:mm:ss) - 3 minutes
+#SBATCH -p mi2104x             # Desired partition, used to be devel
 
-# Load necessary modules
-module load openmpi4/4.1.5
-module load cuda
-
-# Get MPI compilation flags
-MPI_FLAGS=$(mpicxx --showme:compile)
-
-# Compile with hipcc
-hipcc -x hip -O2 horn_schunk_cuda_copy.cu -DUSE_HIP ${MPI_FLAGS} \
+hipcc -x hip -O2 horn_schunk_cuda_copy.cu -DUSE_HIP -o output_cuda.exe \
     -I/home1/bustudent08/local/include/opencv4 \
     -L/home1/bustudent08/local/lib64 \
     -lopencv_core -lopencv_highgui -lopencv_imgproc -lopencv_imgcodecs -lopencv_video \
     -std=c++17 \
-    -lmpi \
-    -Wl,-rpath=/home1/bustudent08/local/lib64 \
-    -o optical_flow.exe
+    -Wl,-rpath=/home1/bustudent08/local/lib64
 
-# Run with MPI
-srun ./optical_flow.exe images/car1.jpg images/car2.jpg car
+srun ./output_cuda.exe images/car1.jpg images/car2.jpg car
 
-# Commented test images for reference
 # images/frame1.png
 # images/frame2.png
+
 # images/car1.jpg
 # images/car2.jpg
+
 # images/eval-data/Basketball/frame10.png
 # images/eval-data/Basketball/frame11.png

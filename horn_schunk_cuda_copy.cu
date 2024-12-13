@@ -5,7 +5,6 @@
 #include <fstream>
 #include <filesystem>
 #include <tuple>
-#include <mpi.h>
 
 #ifdef USE_HIP
 
@@ -53,45 +52,9 @@
 using namespace cv;
 using namespace std;
 
-// Error checking macros
-#ifdef USE_HIP
-#define CHECK_CUDA(call) \
-    do { \
-        hipError_t err = call; \
-        if (err != hipSuccess) { \
-            fprintf(stderr, "HIP error in %s:%d: %s\n", \
-                    __FILE__, __LINE__, hipGetErrorString(err)); \
-            exit(EXIT_FAILURE); \
-        } \
-    } while(0)
-#else
-#define CHECK_CUDA(call) \
-    do { \
-        cudaError_t err = call; \
-        if (err != cudaSuccess) { \
-            fprintf(stderr, "CUDA error in %s:%d: %s\n", \
-                    __FILE__, __LINE__, cudaGetErrorString(err)); \
-            exit(EXIT_FAILURE); \
-        } \
-    } while(0)
-#endif
-
-#define CHECK_MPI(call) \
-    do { \
-        int err = call; \
-        if (err != MPI_SUCCESS) { \
-            char error_string[MPI_MAX_ERROR_STRING]; \
-            int length; \
-            MPI_Error_string(err, error_string, &length); \
-            fprintf(stderr, "MPI error in %s:%d: %s\n", \
-                    __FILE__, __LINE__, error_string); \
-            MPI_Abort(MPI_COMM_WORLD, err); \
-        } \
-    } while(0)
-
 // Hardware specifications for roofline model
-const double PEAK_MEMORY_BANDWIDTH = 160e9;  // 160 GB/s
-const double PEAK_FLOP_RATE = 2.0e12;       // 2.0 TFLOP/s
+const double PEAK_MEMORY_BANDWIDTH = 400e9;  // 400 GB/s
+const double PEAK_FLOP_RATE = 2.5e12;       // 2.5 TFLOP/s
 
 // Calculate theoretical peak performance based on arithmetic intensity
 double calculate_roofline(double arithmetic_intensity) {
@@ -329,252 +292,223 @@ __global__ void fused_horn_schunk(double* __restrict__ u, double* __restrict__ v
     }
 }
 
-// Add these new structures and functions
-struct ImageQuadrant {
-    int start_x, start_y;
-    int width, height;
-    int halo_width;
-    vector<double> data;
-    cudaStream_t stream;
-};
-
-struct HaloRegion {
-    vector<double> top, bottom, left, right;
-};
-
-ImageQuadrant getQuadrantInfo(int rank, int nx, int ny, int halo_width) {
-    ImageQuadrant quad;
-    quad.halo_width = halo_width;
-    
-    // Calculate base dimensions for each quadrant
-    int base_width = nx / 2;
-    int base_height = ny / 2;
-    
-    // Determine quadrant position based on rank
-    quad.start_x = (rank % 2) * base_width;
-    quad.start_y = (rank / 2) * base_height;
-    quad.width = base_width;
-    quad.height = base_height;
-    
-    // Create stream for this quadrant
-    CHECK_CUDA(cudaStreamCreate(&quad.stream));
-    
-    return quad;
-}
-
-void exchangeHalos(ImageQuadrant& quad, double* u_d, double* v_d, int rank, MPI_Comm comm) {
-    int world_size;
-    MPI_Comm_size(comm, &world_size);
-    
-    HaloRegion send_halos, recv_halos;
-    
-    // Prepare halo data
-    int w = quad.width;
-    int h = quad.height;
-    int hw = quad.halo_width;
-    
-    // Resize halo buffers
-    send_halos.top.resize(w * hw);
-    send_halos.bottom.resize(w * hw);
-    send_halos.left.resize(h * hw);
-    send_halos.right.resize(h * hw);
-    recv_halos = send_halos;  // Same sizes for receiving
-    
-    // Determine neighbor ranks
-    int top_rank = (rank >= 2) ? rank - 2 : -1;
-    int bottom_rank = (rank < 2) ? rank + 2 : -1;
-    int left_rank = (rank % 2 == 1) ? rank - 1 : -1;
-    int right_rank = (rank % 2 == 0) ? rank + 1 : -1;
-    
-    // Asynchronously copy halo data from device to host
-    CHECK_CUDA(cudaMemcpyAsync(send_halos.top.data(), 
-                              u_d + quad.start_y * quad.width,
-                              quad.width * quad.halo_width * sizeof(double),
-                              cudaMemcpyDeviceToHost, 
-                              quad.stream));
-    
-    // Similar for other directions...
-    
-    // Ensure device-to-host transfers are complete
-    CHECK_CUDA(cudaStreamSynchronize(quad.stream));
-    
-    // Non-blocking MPI communications
-    vector<MPI_Request> requests;
-    
-    if (top_rank != -1) {
-        CHECK_MPI(MPI_Isend(send_halos.top.data(), w * hw, MPI_DOUBLE, 
-                           top_rank, 0, comm, &requests.emplace_back()));
-        CHECK_MPI(MPI_Irecv(recv_halos.top.data(), w * hw, MPI_DOUBLE, 
-                           top_rank, 0, comm, &requests.emplace_back()));
-    }
-    
-    // Similar for other directions...
-    
-    // Wait for all MPI communications
-    if (!requests.empty()) {
-        CHECK_MPI(MPI_Waitall(requests.size(), requests.data(), MPI_STATUSES_IGNORE));
-    }
-    
-    // Asynchronously copy received halos back to device
-    CHECK_CUDA(cudaMemcpyAsync(u_d + (quad.start_y - quad.halo_width) * quad.width,
-                              recv_halos.top.data(),
-                              quad.width * quad.halo_width * sizeof(double),
-                              cudaMemcpyHostToDevice, 
-                              quad.stream));
-    
-    // Similar for other directions...
-    
-    // Ensure all copies are complete
-    CHECK_CUDA(cudaStreamSynchronize(quad.stream));
-}
-
+// Main function demonstrating usage
 int main(int argc, char* argv[]) {
-    // Initialize MPI
-    CHECK_MPI(MPI_Init(&argc, &argv));
-    
-    int world_rank, world_size;
-    CHECK_MPI(MPI_Comm_rank(MPI_COMM_WORLD, &world_rank));
-    CHECK_MPI(MPI_Comm_size(MPI_COMM_WORLD, &world_size));
-    
-    if (world_size != 4) {
-        if (world_rank == 0) {
-            cerr << "This program requires exactly 4 MPI processes" << endl;
-        }
-        MPI_Finalize();
-        return 1;
+    cout << "Running Horn-Schunck optical flow..." << endl;
+
+    string filename1 = argv[1];
+    string filename2 = argv[2];
+    string outputname = argv[3];
+
+    // Load two consecutive frames
+    Mat frame1_original = imread(filename1, 0);
+    Mat frame2_original = imread(filename2, 0);
+   
+    if (frame1_original.empty() || frame2_original.empty()) {
+        cerr << "Error loading images!" << endl;
+        cerr << "Make sure " << filename1 << " and " << filename2 << " exist in: " << filesystem::current_path() << endl;
+        return -1;
     }
 
-    // Select GPU based on rank
-    int num_gpus;
-    CHECK_CUDA(cudaGetDeviceCount(&num_gpus));
-    CHECK_CUDA(cudaSetDevice(world_rank % num_gpus));
-
-    // Load images only on rank 0
-    Mat frame1_original, frame2_original;
-    int nx, ny;
+    // Define sizes to test
+    vector<int> test_sizes = {128, 256, 512, 1024, 2048};  // Test smaller sizes first
     
-    if (world_rank == 0) {
-        frame1_original = imread(argv[1], 0);
-        frame2_original = imread(argv[2], 0);
+    for (int size : test_sizes) {
+        cout << "\nProcessing size: " << size << "x" << size << endl;
         
-        if (frame1_original.empty() || frame2_original.empty()) {
-            cerr << "Error loading images!" << endl;
-            MPI_Abort(MPI_COMM_WORLD, 1);
+        // Resize images
+        Mat frame1, frame2;
+        resize(frame1_original, frame1, Size(size, size));
+        resize(frame2_original, frame2, Size(size, size));
+        
+        cout << "Resized images - Frame1: " << frame1.size() << " Frame2: " << frame2.size() << endl;
+        
+        // Image size and grid sizes
+        cudaError_t GPU_ERROR;
+        int ny = frame1.rows;
+        int nx = frame1.cols;
+        size_t size_bytes = nx * ny * sizeof(double);
+        int BLOCK_DIM_X = 16;
+        int BLOCK_DIM_Y = 16;
+        dim3 block(BLOCK_DIM_X, BLOCK_DIM_Y);
+        int gridDimX = (nx + block.x - 1) / block.x;
+        int gridDimY = (ny + block.y - 1) / block.y;
+        dim3 grid(gridDimX, gridDimY);
+        cout << "grid x dim: " << gridDimX << ", grid y dim: " << gridDimY << endl;
+
+        // Compute image derivatives
+        Mat IxMat, IyMat, ItMat;
+        computeDerivatives(frame1, frame2, IxMat, IyMat, ItMat);
+
+        // Convert derivatives to vectors
+        double *IxHost, *IyHost, *ItHost;
+        double *uHost, *vHost;
+
+        // Allocate pinned memory with error checking
+        GPU_ERROR = cudaHostAlloc(&IxHost, size_bytes, cudaHostAllocDefault);
+        if (GPU_ERROR != cudaSuccess) {
+            cerr << "Failed to allocate pinned memory for IxHost" << endl;
             return -1;
         }
-        
-        nx = frame1_original.cols;
-        ny = frame1_original.rows;
-    }
-    
-    // Broadcast dimensions to all processes
-    CHECK_MPI(MPI_Bcast(&nx, 1, MPI_INT, 0, MPI_COMM_WORLD));
-    CHECK_MPI(MPI_Bcast(&ny, 1, MPI_INT, 0, MPI_COMM_WORLD));
+        GPU_ERROR = cudaHostAlloc(&IyHost, size_bytes, cudaHostAllocDefault);
+        if (GPU_ERROR != cudaSuccess) {
+            cerr << "Failed to allocate pinned memory for IyHost" << endl;
+            return -1;
+        }
+        GPU_ERROR = cudaHostAlloc(&ItHost, size_bytes, cudaHostAllocDefault);
+        if (GPU_ERROR != cudaSuccess) {
+            cerr << "Failed to allocate pinned memory for ItHost" << endl;
+            return -1;
+        }
+        GPU_ERROR = cudaHostAlloc(&uHost, size_bytes, cudaHostAllocDefault);
+        if (GPU_ERROR != cudaSuccess) {
+            cerr << "Failed to allocate pinned memory for uHost" << endl;
+            return -1;
+        }
+        GPU_ERROR = cudaHostAlloc(&vHost, size_bytes, cudaHostAllocDefault);
+        if (GPU_ERROR != cudaSuccess) {
+            cerr << "Failed to allocate pinned memory for vHost" << endl;
+            return -1;
+        }
 
-    // Get quadrant information for this process
-    ImageQuadrant quad = getQuadrantInfo(world_rank, nx, ny, 1);
-    
-    // Allocate memory for this quadrant
-    size_t quad_size = (quad.width + 2 * quad.halo_width) * 
-                      (quad.height + 2 * quad.halo_width) * sizeof(double);
-    
-    double *u_d, *v_d, *IxDevice, *IyDevice, *ItDevice;
-    CHECK_CUDA(cudaMalloc(&u_d, quad_size));
-    CHECK_CUDA(cudaMalloc(&v_d, quad_size));
-    CHECK_CUDA(cudaMalloc(&IxDevice, quad_size));
-    CHECK_CUDA(cudaMalloc(&IyDevice, quad_size));
-    CHECK_CUDA(cudaMalloc(&ItDevice, quad_size));
+        // Copy data with error checking
+        GPU_ERROR = cudaMemcpy(IxHost, IxMat.ptr<double>(), size_bytes, cudaMemcpyHostToHost);
+        GPU_ERROR = cudaMemcpy(IyHost, IyMat.ptr<double>(), size_bytes, cudaMemcpyHostToHost);
+        GPU_ERROR = cudaMemcpy(ItHost, ItMat.ptr<double>(), size_bytes, cudaMemcpyHostToHost);
 
-    // Main computation loop
-    for(int iter = 0; iter < iterations; iter++) {
-        // Exchange halos between processes
-        exchangeHalos(quad, u_d, v_d, world_rank, MPI_COMM_WORLD);
-        
-        // Launch kernel in quadrant's stream
-        fused_horn_schunk<<<grid, block, 0, quad.stream>>>(
-            u_d, v_d, IxDevice, IyDevice, ItDevice, 
-            alpha, quad.width, quad.height
-        );
-        
-        CHECK_CUDA(cudaGetLastError());
-    }
+        double *IxDevice, *IyDevice, *ItDevice;
+        // Allocate memory on device
+        GPU_ERROR = cudaMalloc(&IxDevice, size_bytes);
+        if (GPU_ERROR != cudaSuccess) {
+            cerr << "Failed to allocate Ix device memory" << endl;
+            continue;  // Skip to next size if allocation fails
+        }
+        GPU_ERROR = cudaMalloc(&IyDevice, size_bytes);
+        if (GPU_ERROR != cudaSuccess) {
+            cudaFree(IxDevice);
+            cerr << "Failed to allocate Iy device memory" << endl;
+            continue;
+        }
+        GPU_ERROR = cudaMalloc(&ItDevice, size_bytes);
+        if (GPU_ERROR != cudaSuccess) {
+            cudaFree(IxDevice);
+            cudaFree(IyDevice);
+            cerr << "Failed to allocate It device memory" << endl;
+            continue;
+        }
 
-    // Gather results
-    vector<double> u_result(quad.width * quad.height);
-    vector<double> v_result(quad.width * quad.height);
-    
-    CHECK_CUDA(cudaMemcpyAsync(u_result.data(), u_d, 
-                              quad.width * quad.height * sizeof(double),
-                              cudaMemcpyDeviceToHost, quad.stream));
-    CHECK_CUDA(cudaMemcpyAsync(v_result.data(), v_d, 
-                              quad.width * quad.height * sizeof(double),
-                              cudaMemcpyDeviceToHost, quad.stream));
-    
-    CHECK_CUDA(cudaStreamSynchronize(quad.stream));
+        // Copy derivatives to device
+        GPU_ERROR = cudaMemcpy(IxDevice, IxHost, size_bytes, cudaMemcpyHostToDevice);
+        GPU_ERROR = cudaMemcpy(IyDevice, IyHost, size_bytes, cudaMemcpyHostToDevice);
+        GPU_ERROR = cudaMemcpy(ItDevice, ItHost, size_bytes, cudaMemcpyHostToDevice);
 
-    if (world_rank == 0) {
-        vector<double> full_u(nx * ny), full_v(nx * ny);
+        // Allocate device memory for results
+        double *u_d, *v_d;
+        GPU_ERROR = cudaMalloc(&u_d, size_bytes);
+        GPU_ERROR = cudaMalloc(&v_d, size_bytes);
+
+        // Initialize device memory to zero
+        GPU_ERROR = cudaMemset(u_d, 0, size_bytes);
+        GPU_ERROR = cudaMemset(v_d, 0, size_bytes);
+
+        // Add timing variables
+        cudaEvent_t start, stop;
+        GPU_ERROR = cudaEventCreate(&start);
+        GPU_ERROR = cudaEventCreate(&stop);
         
-        // Copy rank 0's results
-        for (int y = 0; y < quad.height; y++) {
-            memcpy(&full_u[y * nx + quad.start_x],
-                  &u_result[y * quad.width],
-                  quad.width * sizeof(double));
-            memcpy(&full_v[y * nx + quad.start_x],
-                  &v_result[y * quad.width],
-                  quad.width * sizeof(double));
+        // Start timing
+        GPU_ERROR = cudaEventRecord(start);
+
+        // Compute optical flow with fused kernel
+        int iterations = 200;
+        double alpha = 1;
+        
+        for(int iter = 0; iter < iterations; iter++) {
+            fused_horn_schunk<<<grid, block>>>(u_d, v_d, IxDevice, IyDevice, ItDevice, alpha, nx, ny);
         }
         
-        // Gather results from other ranks
-        for (int i = 1; i < world_size; i++) {
-            ImageQuadrant other_quad = getQuadrantInfo(i, nx, ny, 1);
-            vector<double> temp_u(other_quad.width * other_quad.height);
-            vector<double> temp_v(other_quad.width * other_quad.height);
-            
-            CHECK_MPI(MPI_Recv(temp_u.data(), temp_u.size(), MPI_DOUBLE, 
-                              i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE));
-            CHECK_MPI(MPI_Recv(temp_v.data(), temp_v.size(), MPI_DOUBLE, 
-                              i, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE));
-            
-            for (int y = 0; y < other_quad.height; y++) {
-                memcpy(&full_u[(y + other_quad.start_y) * nx + other_quad.start_x],
-                      &temp_u[y * other_quad.width],
-                      other_quad.width * sizeof(double));
-                memcpy(&full_v[(y + other_quad.start_y) * nx + other_quad.start_x],
-                      &temp_v[y * other_quad.width],
-                      other_quad.width * sizeof(double));
-            }
-        }
+        // Stop timing
+        GPU_ERROR = cudaEventRecord(stop);
+        GPU_ERROR = cudaEventSynchronize(stop);
         
-        // Visualize results
-        Mat flowX = Mat(ny, nx, CV_64F, full_u.data());
-        Mat flowY = Mat(ny, nx, CV_64F, full_v.data());
+        float elapsed_time_ms;
+        GPU_ERROR = cudaEventElapsedTime(&elapsed_time_ms, start, stop);
+        double elapsed_time_s = elapsed_time_ms / 1000.0;
         
-        Mat img_color;
-        cvtColor(frame1_original, img_color, COLOR_GRAY2BGR);
+        // Get performance metrics
+        auto [measured_tflops, ai, peak_tflops] = analyze_performance(nx, ny, iterations, elapsed_time_s, gridDimX, gridDimY);
+        
+        // Print performance table
+        printf("\nGrid Size | TFLOPS | AI | Peak TFLOPS | Time(s) | Iterations\n");
+        printf("---------|--------|----|-----------  |---------|------------|\n");
+        printf("%4dx%4d | %6.6f | %6.6f | %6.6f | %7.6f | %10d |\n",
+               nx, ny, measured_tflops, ai, peak_tflops, elapsed_time_s, iterations);
+
+        // Copy results back to host
+        vector<double> u_result(nx * ny);
+        vector<double> v_result(nx * ny);
+        GPU_ERROR = cudaMemcpy(u_result.data(), u_d, size_bytes, cudaMemcpyDeviceToHost);
+        GPU_ERROR = cudaMemcpy(v_result.data(), v_d, size_bytes, cudaMemcpyDeviceToHost);
+
+        // Visualize and save results
+        Mat img_color, flowX, flowY;
+        cvtColor(frame1, img_color, COLOR_GRAY2BGR);
+        flowX = vectorToMat<double>(u_result, ny, nx, CV_64F);
+        flowY = vectorToMat<double>(v_result, ny, nx, CV_64F); 
         drawOpticalFlow(flowX, flowY, img_color);
-        
+
         Mat flow_vis;
         visualizeFlowHSV(flowX, flowY, flow_vis);
+
+        string size_str = to_string(size);
+        imwrite("outputs/CUDA_optical_flow_" + outputname + "_" + size_str + "x" + size_str + ".png", img_color);
+        imwrite("outputs/CUDA_optical_flow_hsv_" + outputname + "_" + size_str + "x" + size_str + ".png", flow_vis);
+
+        // Cleanup
+        if (cudaEventDestroy(start) != cudaSuccess) {
+            cerr << "Error destroying start event" << endl;
+        }
+        if (cudaEventDestroy(stop) != cudaSuccess) {
+            cerr << "Error destroying stop event" << endl;
+        }
+        if (cudaFree(IxDevice) != cudaSuccess) {
+            cerr << "Error freeing IxDevice" << endl;
+        }
+        if (cudaFree(IyDevice) != cudaSuccess) {
+            cerr << "Error freeing IyDevice" << endl;
+        }
+        if (cudaFree(ItDevice) != cudaSuccess) {
+            cerr << "Error freeing ItDevice" << endl;
+        }
+        if (cudaFree(u_d) != cudaSuccess) {
+            cerr << "Error freeing u_d" << endl;
+        }
+        if (cudaFree(v_d) != cudaSuccess) {
+            cerr << "Error freeing v_d" << endl;
+        }
+
+        // Free pinned memory
+        if (cudaFreeHost(IxHost) != cudaSuccess) {
+            cerr << "Error freeing IxHost" << endl;
+        }
+        if (cudaFreeHost(IyHost) != cudaSuccess) {
+            cerr << "Error freeing IyHost" << endl;
+        }
+        if (cudaFreeHost(ItHost) != cudaSuccess) {
+            cerr << "Error freeing ItHost" << endl;
+        }
+        if (cudaFreeHost(uHost) != cudaSuccess) {
+            cerr << "Error freeing uHost" << endl;
+        }
+        if (cudaFreeHost(vHost) != cudaSuccess) {
+            cerr << "Error freeing vHost" << endl;
+        }
         
-        imwrite("outputs/MPI_CUDA_flow_" + string(argv[3]) + ".png", img_color);
-        imwrite("outputs/MPI_CUDA_flow_hsv_" + string(argv[3]) + ".png", flow_vis);
-    } else {
-        // Send results to rank 0
-        CHECK_MPI(MPI_Send(u_result.data(), u_result.size(), MPI_DOUBLE, 
-                          0, 0, MPI_COMM_WORLD));
-        CHECK_MPI(MPI_Send(v_result.data(), v_result.size(), MPI_DOUBLE, 
-                          0, 1, MPI_COMM_WORLD));
+        // Force synchronization before next iteration
+        if (cudaDeviceSynchronize() != cudaSuccess) {
+            cerr << "Error in device synchronization" << endl;
+        }
     }
 
-    // Cleanup
-    CHECK_CUDA(cudaStreamDestroy(quad.stream));
-    CHECK_CUDA(cudaFree(u_d));
-    CHECK_CUDA(cudaFree(v_d));
-    CHECK_CUDA(cudaFree(IxDevice));
-    CHECK_CUDA(cudaFree(IyDevice));
-    CHECK_CUDA(cudaFree(ItDevice));
-    
-    MPI_Finalize();
     return 0;
 }
