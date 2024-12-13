@@ -1,0 +1,48 @@
+Lmod has detected the following error: The following module(s) are unknown:
+"cuda"
+
+Please check the spelling or version number. Also try "module spider ..."
+It is also possible your cache file is out-of-date; it may help to try:
+  $ module --ignore_cache load "cuda"
+
+Also make sure that all modulefiles written in TCL start with the string
+#%Module
+
+
+
+horn_schunk_cuda_copy.cu:489:30: error: use of undeclared identifier 'iterations'; did you mean 'iterator'?
+  489 |     for(int iter = 0; iter < iterations; iter++) {
+      |                              ^~~~~~~~~~
+      |                              iterator
+/usr/lib/gcc/x86_64-redhat-linux/11/../../../../include/c++/11/bits/stl_iterator_base_types.h:127:12: note: 'iterator' declared here
+  127 |     struct iterator
+      |            ^
+horn_schunk_cuda_copy.cu:489:30: error: use of undeclared identifier 'iterations'
+  489 |     for(int iter = 0; iter < iterations; iter++) {
+      |                              ^
+horn_schunk_cuda_copy.cu:494:29: error: use of undeclared identifier 'grid'
+  494 |         fused_horn_schunk<<<grid, block, 0, quad.stream>>>(
+      |                             ^
+horn_schunk_cuda_copy.cu:494:35: error: use of undeclared identifier 'block'
+  494 |         fused_horn_schunk<<<grid, block, 0, quad.stream>>>(
+      |                                   ^
+horn_schunk_cuda_copy.cu:496:13: error: use of undeclared identifier 'alpha'
+  496 |             alpha, quad.width, quad.height
+      |             ^
+horn_schunk_cuda_copy.cu:499:20: error: use of undeclared identifier 'cudaGetLastError'; did you mean 'hipGetLastError'?
+  499 |         CHECK_CUDA(cudaGetLastError());
+      |                    ^~~~~~~~~~~~~~~~
+      |                    hipGetLastError
+horn_schunk_cuda_copy.cu:60:26: note: expanded from macro 'CHECK_CUDA'
+   60 |         hipError_t err = call; \
+      |                          ^
+/opt/rocm-6.2.1/lib/llvm/bin/../../../include/hip/hip_runtime_api.h:2306:12: note: 'hipGetLastError' declared here
+ 2306 | hipError_t hipGetLastError(void);
+      |            ^
+6 errors generated when compiling for gfx90a.
+failed to execute:/opt/rocm-6.2.1/lib/llvm/bin/clang++  --offload-arch=gfx90a --offload-arch=gfx90a --offload-arch=gfx90a --offload-arch=gfx90a --driver-mode=g++ --hip-link  -x hip -O2 horn_schunk_cuda_copy.cu -DUSE_HIP -I/opt/ohpc/pub/mpi/openmpi4-gnu12/4.1.5/include -I/home1/bustudent08/local/include/opencv4 -L/home1/bustudent08/local/lib64 -lopencv_core -lopencv_highgui -lopencv_imgproc -lopencv_imgcodecs -lopencv_video -std=c++17 -lmpi -Wl,-rpath=/home1/bustudent08/local/lib64 -o "optical_flow.exe"
+slurmstepd-t004-004: error: execve(): /home1/bustudent08/APMA2822B/ARRAYS/Cuda-Horn-Schunk/./optical_flow.exe: No such file or directory
+slurmstepd-t004-004: error: execve(): /home1/bustudent08/APMA2822B/ARRAYS/Cuda-Horn-Schunk/./optical_flow.exe: No such file or directory
+slurmstepd-t004-004: error: execve(): /home1/bustudent08/APMA2822B/ARRAYS/Cuda-Horn-Schunk/./optical_flow.exe: No such file or directory
+slurmstepd-t004-004: error: execve(): /home1/bustudent08/APMA2822B/ARRAYS/Cuda-Horn-Schunk/./optical_flow.exe: No such file or directory
+srun: error: t004-004: tasks 0-3: Exited with exit code 2
