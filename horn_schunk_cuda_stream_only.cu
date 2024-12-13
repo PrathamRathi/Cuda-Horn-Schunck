@@ -292,7 +292,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Define sizes to test
-    vector<int> test_sizes = {128, 256, 512, 1024, 2048};  // Test smaller sizes first
+    vector<int> test_sizes = {128, 256, 512, 1024, 2048, 4096};  // Test smaller sizes first
     
     for (int size : test_sizes) {
         cout << "\nProcessing size: " << size << "x" << size << endl;
