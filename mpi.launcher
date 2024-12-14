@@ -44,6 +44,6 @@ hipcc -x hip -O2 horn_schunck_cuda_mpi.cu -DUSE_HIP ${MPI_COMPILE_FLAGS} ${MPI_L
     -o horn_schunk_cuda_mpi.exe
 
 # Run the program
-srun ./horn_schunk_cuda_mpi.exe images/car512f1.jpg images/car512f2.jpg carMPI512
+srun ./horn_schunk_cuda_mpi.exe images/car256f1.jpg images/car256f2.jpg carMPI256
 
-mpirun -np 4 nvprof --metrics flop_count_sp ./horn_schunk_cuda_mpi.exe images/car512f1.jpg images/car512f2.jpg carMPI512
+rocprof --stats ./horn_schunk_cuda_mpi.exe images/car256f1.jpg images/car256f2.jpg carMPI256
