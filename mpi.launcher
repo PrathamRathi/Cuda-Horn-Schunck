@@ -21,15 +21,29 @@ export HIPCC_COMPILE_FLAGS_APPEND="$(mpicxx --showme:compile)"
 MPI_COMPILE_FLAGS=$(mpicxx --showme:compile)
 MPI_LINK_FLAGS=$(mpicxx --showme:link)
 
-# Compile with hipcc
-hipcc -x hip -O2 test.cu -DUSE_HIP ${MPI_COMPILE_FLAGS} ${MPI_LINK_FLAGS} \
+# # Compile with hipcc
+# hipcc -x hip -O2 test.cu -DUSE_HIP ${MPI_COMPILE_FLAGS} ${MPI_LINK_FLAGS} \
+#     -I/home1/bustudent13/local/include/opencv4 \
+#     -L/home1/bustudent13/local/lib64 \
+#     -lopencv_core -lopencv_highgui -lopencv_imgproc -lopencv_imgcodecs -lopencv_video \
+#     -std=c++17 \
+#     -lmpi \
+#     -Wl,-rpath=/home1/bustudent13/local/lib64 \
+#     -o test.exe
+
+# # Run the program
+# srun ./test.exe
+
+hipcc -x hip -O2 horn_schunck_cuda_mpi.cu -DUSE_HIP ${MPI_COMPILE_FLAGS} ${MPI_LINK_FLAGS} \
     -I/home1/bustudent13/local/include/opencv4 \
     -L/home1/bustudent13/local/lib64 \
     -lopencv_core -lopencv_highgui -lopencv_imgproc -lopencv_imgcodecs -lopencv_video \
     -std=c++17 \
     -lmpi \
     -Wl,-rpath=/home1/bustudent13/local/lib64 \
-    -o test.exe
+    -o horn_schunk_cuda_mpi.exe
 
 # Run the program
-srun ./test.exe
+srun ./horn_schunk_cuda_mpi.exe images/car512f1.jpg images/car512f2.jpg carMPI512
+
+mpirun -np 4 nvprof --metrics flop_count_sp ./horn_schunk_cuda_mpi.exe images/car512f1.jpg images/car512f2.jpg carMPI512
