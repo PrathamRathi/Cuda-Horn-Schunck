@@ -53,7 +53,7 @@ using namespace cv;
 using namespace std;
 
 // Hardware specifications for roofline model
-const double PEAK_MEMORY_BANDWIDTH = 400e9;  // 400 GB/s
+const double PEAK_MEMORY_BANDWIDTH = 1.6e12;  //  1.6 TB/s
 const double PEAK_FLOP_RATE = 2.5e12;       // 2.5 TFLOP/s
 const int NUM_STREAMS = 16;
 
